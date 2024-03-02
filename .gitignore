@@ -5,3 +5,8 @@
 # Not suitable for the public
 /todo.md
 /shac/original_train.py
+
+# Misc
+/__pycache__
+/envs/__pycache__
+/shac/__pycache__

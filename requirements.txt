@@ -1,0 +1,11 @@
+absl-py
+flax
+jax>=0.4.6
+jaxlib>=0.4.6
+mujoco
+mujoco-mjx
+numpy
+optax
+tensorboardX
+typing-extensions
+brax==0.9.4

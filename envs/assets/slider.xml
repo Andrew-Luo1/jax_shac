@@ -1,0 +1,22 @@
+<mujoco model="slider">
+	<option timestep="0.002" iterations="1" ls_iterations="4" solver="Newton" gravity="0 0 -9.81">
+		<flag eulerdamp="disable"/>
+	</option>
+	<default>
+		<joint armature="0" damping="5"/>
+		<geom contype="0" friction="1 0.1 0.1" />
+		<motor ctrlrange="-1 1"/>
+	</default>
+
+	<worldbody>
+		<geom name="rail" pos="0 0 0" quat="0.707 0 0.707 0" size="0.02 4" type="capsule"/>
+		<body name="cart" pos="0 0 0">
+			<joint axis="1 0 0" limited="true" name="slider" pos="0 0 0" range="-4 4" type="slide"/>
+			<!-- <joint axis="1 0 0" limited="false" name="slider" pos="0 0 0" type="slide"/> -->
+			<geom name="cart" pos="0 0 0" quat="0.707 0 0.707 0" size="0.1 0.1" type="capsule"/>
+		</body>
+	</worldbody>
+	<actuator>
+		<motor ctrllimited="true" gear="100" joint="slider" name="slide"/>
+	</actuator>
+</mujoco>

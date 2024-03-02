@@ -1,0 +1,45 @@
+<!-- An easier version of inverted pendulum: a) No x limit, b) So omit the rail geom. -->
+<mujoco model="inverted pendulum">
+	<!-- <compiler inertiafromgeom="true"/> -->
+    <compiler angle="radian"/>
+	<option timestep="0.002" iterations="1" ls_iterations="4" solver="Newton" gravity="0 0 -9.81">
+		<flag eulerdamp="disable"/>
+	</option>
+	<default>
+		<joint armature="0" damping="0.1" limited="true"/>
+		<geom contype="0" friction="1 0.1 0.1" />
+		<tendon/>
+		<motor ctrlrange="-3 3"/>
+	</default>
+	<!-- <option gravity="0 0 -9.81" timestep="0.02" /> -->
+	<!-- <custom> -->
+		<!-- brax custom params -->
+    <!-- <numeric data="10000" name="constraint_stiffness"/>
+		<numeric data="10000" name="constraint_limit_stiffness"/>
+		<numeric data="0" name="spring_mass_scale"/>
+		<numeric data="1" name="spring_inertia_scale"/>
+    <numeric data="5" name="solver_maxls"/> -->
+	<!-- </custom> -->
+	<size nstack="3000"/>
+	<worldbody>
+		<!--geom name="ground" type="plane" pos="0 0 0" /-->
+		<!-- <geom name="rail" pos="0 0 0" quat="0.707 0 0.707 0" size="0.02 1" type="capsule"/> -->
+		<!-- <geom name="rail" pos="0 0 0" quat="0.707 0 0.707 0" size="0.02 4" type="capsule"/> -->
+		<body name="cart" pos="0 0 0">
+		    <camera name="track" pos="0 -3.5 1" xyaxes="1 0 0 0 0 1" mode="track"/>
+
+			<!-- <joint axis="1 0 0" limited="true" name="slider" pos="0 0 0" range="-1 1" type="slide"/> -->
+			<joint axis="1 0 0" limited="false" name="slider" pos="0 0 0" range="-4 4" type="slide"/>
+			<geom name="cart" pos="0 0 0" quat="0.707 0 0.707 0" size="0.1 0.1" type="capsule"/>
+			<body name="pole" pos="0 0 0">
+				<!-- <joint axis="0 1 0" name="hinge" pos="0 0 0" range="-0.79 0.79" type="hinge"/> -->
+				<joint axis="0 1 0" name="hinge" pos="0 0 0" limited="true" range="-0.8 0.8" type="hinge"/>
+				<geom fromto="0 0 0 0.001 0 1" name="cpole" size="0.049 0.5" type="capsule"/>
+				<!--                 <body name="pole2" pos="0.001 0 0.6"><joint name="hinge2" type="hinge" pos="0 0 0" axis="0 1 0"/><geom name="cpole2" type="capsule" fromto="0 0 0 0 0 0.6" size="0.05 0.3" rgba="0.7 0 0.7 1"/><site name="tip2" pos="0 0 .6"/></body>-->
+			</body>
+		</body>
+	</worldbody>
+	<actuator>
+		<motor ctrllimited="true" ctrlrange="-4 4" gear="100" joint="slider" name="slide"/>
+	</actuator>
+</mujoco>

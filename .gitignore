@@ -1,0 +1,7 @@
+# Logging
+/tensorboards
+/checkpoints
+
+# Not suitable for the public
+/todo.md
+/shac/original_train.py

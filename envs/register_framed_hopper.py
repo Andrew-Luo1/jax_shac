@@ -62,7 +62,7 @@ class FramedHopper(MjxEnv):
         # obs_history = jp.zeros((self.num_history_steps, d_oh)) # @HERE
 
         # obs = self._get_obs(pipeline_state, obs_history) # @HERE
-        obs = self._get_obs(pipeline_state)
+        obs = self._get_obs(pipeline_state, last_action=0)
         reward, done = jp.zeros(2)
         metrics = {}
 
@@ -71,7 +71,7 @@ class FramedHopper(MjxEnv):
                 'action': 0.0,
                 'velocity': 0.0
             },
-            'prev_action': 0.0
+            'last_action': 0.0
             # 'obs_hist': obs_history # @HERE
         }
 
@@ -96,9 +96,9 @@ class FramedHopper(MjxEnv):
         
         reward = sum(reward_tuple.values())
         state.info['reward_tuple'] = reward_tuple
-        state.info['prev_action'] = raw_action
+        state.info['last_action'] = raw_action
 
-        obs = self._get_obs(pipeline_state, state.info['prev_action'])
+        obs = self._get_obs(pipeline_state, state.info['last_action'])
         
         # obs_hist = state.info['obs_hist'] # HERE
         # obs_hist = jp.roll(obs_hist, 1, axis=0)
@@ -121,6 +121,6 @@ class FramedHopper(MjxEnv):
         #                        jp.ravel(obs_hist).reshape(hist_d)]) # Plus a lot # HERE
         return jp.concatenate([pipeline_state.qpos, # 0:3
                                pipeline_state.qvel, # 3:6
-                               last_action.reshape(1)]) # Plus a lot # HERE
+                               last_action.reshape(1)]) # 7
 
 envs.register_environment("framed_hopper", FramedHopper)

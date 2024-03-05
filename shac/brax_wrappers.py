@@ -36,9 +36,9 @@ class AppendObsHistory(Wrapper):
     state = self.env.reset(rng)
     cur_obs = state.obs
         
-    obs_history = jp.zeros((self.num_history_steps, self.d_obs))
+    obs_hist = jp.zeros((self.num_history_steps, self.d_obs))
     
-    stacked_obs = self.stack_obs(cur_obs, obs_history)
+    stacked_obs = self.stack_obs(cur_obs, obs_hist)
     state = state.replace(obs=stacked_obs)
     
     obs_hist = obs_hist.at[0].set(cur_obs)
@@ -76,7 +76,7 @@ class AppendObsHistory(Wrapper):
   @property
   def observation_size(self) -> int:
     nom_obs_size = self.env.observation_size
-    return (nom_obs_size[0]*self.num_history_steps,)
+    return (nom_obs_size[0]*(self.num_history_steps + 1),)
 
   
 class AutoSampleInitQ(Wrapper):

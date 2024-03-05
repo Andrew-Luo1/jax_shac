@@ -43,26 +43,12 @@ from jax.experimental import checkify
 from jaxtyping import Array, Shaped, jaxtyped, Shaped
 from typeguard import typechecked as typechecker
 
-# from shac_custom_grad import brax_acting
-from shac_custom_grad import losses_vPsC as shac_losses
-from shac_custom_grad import networks_vPsC as shac_networks
-from shac_custom_grad import brax_wrappers
+import losses as shac_losses
+import networks as shac_networks
+import brax_wrappers
 
 InferenceParams = Tuple[running_statistics.NestedMeanStd, Params]
 Metrics = types.Metrics
-
-# @flax.struct.dataclass
-# class TrainingStateLogSigma:
-#   """Contains training state for the learner."""
-#   policy_optimizer_state: optax.OptState
-#   policy_params: Params
-#   policy_lnsig_optimizer_state: optax.OptState
-#   policy_lnsig_params: jnp.ndarray
-#   value_optimizer_state: optax.OptState
-#   value_params: Params
-#   target_value_params: Params
-#   normalizer_params: running_statistics.RunningStatisticsState
-#   env_steps: jnp.ndarray
 
 @flax.struct.dataclass
 class TrainingState:
@@ -122,7 +108,7 @@ def train(environment: envs.Env,
     
     """SHAC training.
     
-    Arguments: 
+    Arguments:
 
     value_burn_in: if you load in policy and normalizer parameters, the number of evals to run without updating the policy. Note the normalizer still gets updated, but only with the distribution of observations coming from the unchanged policy. 
 

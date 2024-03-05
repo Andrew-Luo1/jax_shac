@@ -1,6 +1,6 @@
 # Logging
-/tensorboards
-/checkpoints
+/shac/tensorboards
+/shac/checkpoints
 
 # Not suitable for the public
 /todo.md

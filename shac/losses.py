@@ -1,7 +1,7 @@
 from typing import Any, Tuple
 
 from brax.training import types
-from shac_custom_grad import networks as shac_networks
+from jax_shac.shac import networks as shac_networks
 from brax.training.types import Params
 import flax
 import jax

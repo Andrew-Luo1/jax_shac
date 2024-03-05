@@ -5,8 +5,7 @@ resources_dir = Path(__file__).parent.parent
 sys.path.append(str(resources_dir))
 
 from brax import envs
-from resources.mjx_envs import State, MjxEnv
-from resources import slider_motor_xml, slider_position_xml
+from jax_shac.envs.mjx_envs import State, MjxEnv
 import mujoco
 import jax.numpy as jp
 import jax
@@ -25,7 +24,7 @@ class FramedHopper(MjxEnv):
         self.action_reward = -0.2 # Make it negative.
 
         xml_path = Path(Path(__file__).parent, Path("assets"), 
-                        Path("framed_hopper_simple.xml"))
+                        Path("framed_hopper.xml"))
         
         mj_model = mujoco.MjModel.from_xml_path(str(xml_path))
         self.init_noise = kwargs.get("init_noise", 0.1) # diameter of the ball

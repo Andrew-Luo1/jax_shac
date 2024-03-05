@@ -16,9 +16,9 @@
 
 from typing import Sequence, Tuple, Any
 
-import shac_custom_grad.brax_distribution as distribution
+import jax_shac.shac.brax_distribution as distribution
 # from brax.training import networks
-import shac_custom_grad.brax_networks as networks
+import jax_shac.shac.brax_networks as networks
 from brax.training import types
 from brax.training.types import PRNGKey
 import flax

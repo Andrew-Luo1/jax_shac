@@ -43,9 +43,9 @@ from jax.experimental import checkify
 from jaxtyping import Array, Shaped, jaxtyped, Shaped
 from typeguard import typechecked as typechecker
 
-import losses as shac_losses
-import networks as shac_networks
-import brax_wrappers
+from . import losses as shac_losses # relative intra-package imports.
+from . import networks as shac_networks
+from . import brax_wrappers as brax_wrappers
 
 InferenceParams = Tuple[running_statistics.NestedMeanStd, Params]
 Metrics = types.Metrics
@@ -117,7 +117,7 @@ def train(environment: envs.Env,
     
     if use_tbx:
         algo_dir = Path(__file__).parent
-        log_dir = Path(algo_dir, Path(tbx_logdir), Path(tbx_experiment_name))
+        log_dir = Path(algo_dir, Path("tensorboards"), Path(tbx_logdir), Path(tbx_experiment_name))
         writer = SummaryWriter(str(log_dir))
     
     env_step_per_training_step = (

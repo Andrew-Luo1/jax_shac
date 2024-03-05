@@ -38,7 +38,7 @@ class FramedHopper(MjxEnv):
         kwargs['physics_steps_per_control_step'] = kwargs.get('physics_steps_per_control_step', n_frames)
         
         # Also give the observation history.
-        self.num_history_steps = 3 # 1 step doesn't work; i.e. merely providing acceleration.
+        self.num_history_steps = kwargs.get('num_history_steps', 3)
 
         super().__init__(mj_model=mj_model, **kwargs)
         assert self.sys.nq == 3, "Wrong model!"
@@ -58,10 +58,11 @@ class FramedHopper(MjxEnv):
         pipeline_state = self.pipeline_init(q, qd)
 
         # Tell the neural net about previous states and actions.
-        d_oh = self.sys.nq + self.sys.nv + self.sys.nu
-        obs_history = jp.zeros((self.num_history_steps, d_oh))
+        # d_oh = self.sys.nq + self.sys.nv + self.sys.nu
+        # obs_history = jp.zeros((self.num_history_steps, d_oh)) # @HERE
 
-        obs = self._get_obs(pipeline_state, obs_history)
+        # obs = self._get_obs(pipeline_state, obs_history) # @HERE
+        obs = self._get_obs(pipeline_state)
         reward, done = jp.zeros(2)
         metrics = {}
 
@@ -70,7 +71,8 @@ class FramedHopper(MjxEnv):
                 'action': 0.0,
                 'velocity': 0.0
             },
-            'obs_hist': obs_history
+            'prev_action': 0.0
+            # 'obs_hist': obs_history # @HERE
         }
 
         return jax.lax.stop_gradient(State(pipeline_state, obs, reward, done, metrics, state_info))
@@ -85,34 +87,40 @@ class FramedHopper(MjxEnv):
         action = self.action_offset + raw_action*self.action_strength
         torques = action
         pipeline_state = self.pipeline_step(state.pipeline_state, action)
-        obs = self._get_obs(pipeline_state, state.info['obs_hist'])
 
         reward_tuple = {
-            'velocity': obs[3] * self.velocity_reward,
+            'velocity': pipeline_state.qvel[0] * self.velocity_reward,
             'action': (jp.linalg.norm(torques.reshape()) 
                        * self.action_reward)
         }
+        
         reward = sum(reward_tuple.values())
         state.info['reward_tuple'] = reward_tuple
+        state.info['prev_action'] = raw_action
+
+        obs = self._get_obs(pipeline_state, state.info['prev_action'])
         
-        obs_hist = state.info['obs_hist']
-        obs_hist = jp.roll(obs_hist, 1, axis=0)
-        obs_hist = obs_hist.at[0].set(jp.concatenate(
-            [pipeline_state.qpos.reshape(3),
-             pipeline_state.qvel.reshape(3),
-             raw_action.reshape(1)]))
+        # obs_hist = state.info['obs_hist'] # HERE
+        # obs_hist = jp.roll(obs_hist, 1, axis=0)
+        # obs_hist = obs_hist.at[0].set(jp.concatenate(
+        #     [pipeline_state.qpos.reshape(3),
+        #      pipeline_state.qvel.reshape(3),
+        #      raw_action.reshape(1)]))
         
-        state.info['obs_hist'] = obs_hist
+        # state.info['obs_hist'] = obs_hist
 
         return state.replace(
             pipeline_state=pipeline_state, obs=obs, reward=reward, done=0.0
         )
 
-    def _get_obs(self, pipeline_state: State, obs_hist: jax.Array) -> jax.Array:
+    def _get_obs(self, pipeline_state: State, last_action: jax.Array) -> jax.Array:
         """Observe cartpole body position and velocities."""
-        hist_d = (self.sys.nq + self.sys.nv + self.sys.nu)*self.num_history_steps
+        # hist_d = (self.sys.nq + self.sys.nv + self.sys.nu)*self.num_history_steps
+        # return jp.concatenate([pipeline_state.qpos, # 0:3
+        #                        pipeline_state.qvel, # 3:6
+        #                        jp.ravel(obs_hist).reshape(hist_d)]) # Plus a lot # HERE
         return jp.concatenate([pipeline_state.qpos, # 0:3
                                pipeline_state.qvel, # 3:6
-                               jp.ravel(obs_hist).reshape(hist_d)]) # Plus a lot 
+                               last_action.reshape(1)]) # Plus a lot # HERE
 
 envs.register_environment("framed_hopper", FramedHopper)

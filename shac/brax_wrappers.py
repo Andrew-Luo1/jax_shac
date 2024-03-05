@@ -13,6 +13,72 @@ from flax import struct
 import jax
 from jax import numpy as jp
 
+
+class AppendObsHistory(Wrapper):
+  
+  def __init__(self, env: Env):
+    super().__init__(env)
+    if 'num_history_steps' not in dir(self.env):
+      raise ValueError("Wrapped environment didn't specify number of history steps!")
+    
+    assert len(self.env.observation_size) == 1, "Haven't implemented history yet for multi-D observations."
+    
+    self.num_history_steps = self.env.num_history_steps
+    self.d_obs = self.env.observation_size[0]
+
+  def reset(self, rng:jax.Array)->State:
+    """ 
+    0. Init history
+    1. Append history to obs
+    2. Update obs history
+    """
+    
+    state = self.env.reset(rng)
+    cur_obs = state.obs
+        
+    obs_history = jp.zeros((self.num_history_steps, self.d_obs))
+    
+    stacked_obs = self.stack_obs(cur_obs, obs_history)
+    state = state.replace(obs=stacked_obs)
+    
+    obs_hist = obs_hist.at[0].set(cur_obs)
+    state.info['obs_hist'] = obs_hist
+    
+    return state
+  
+  def stack_obs(self, obs, obs_history):
+    return jp.concatenate([
+      obs,
+      jp.ravel(obs_history).reshape(
+        self.d_obs * self.num_history_steps)
+    ])
+    
+  def step(self, state: State, action: jax.Array) -> State:
+    """ 
+    1. Append history to obs
+    2. Update obs history
+    """
+    
+    ## Main
+    state = self.env.step(state, action)
+    cur_obs = state.obs
+
+    stacked_obs = self.stack_obs(cur_obs, state.info['obs_hist'])
+    state = state.replace(obs=stacked_obs)
+
+    obs_hist = state.info['obs_hist']
+    obs_hist = jp.roll(obs_hist, 1, axis=0)
+    obs_hist = obs_hist.at[0].set(cur_obs)
+    state.info['obs_hist'] = obs_hist
+        
+    return state
+  
+  @property
+  def observation_size(self) -> int:
+    nom_obs_size = self.env.observation_size
+    return (nom_obs_size[0]*self.num_history_steps,)
+
+  
 class AutoSampleInitQ(Wrapper):
   """Autoreset Wrapper just pulls up the random position sampled from the original reset. This wrapper resets that value.
   TODO: 

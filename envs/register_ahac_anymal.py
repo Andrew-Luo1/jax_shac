@@ -19,7 +19,7 @@ import mujoco
 
 from . import anymal_xml
 from .mjx_envs import State, MjxEnv
-from ..utils.math_utils import axis_angle_to_quaternion
+from jax_shac.utils.math_utils import axis_angle_to_quaternion
 
 def get_config():
   """Returns reward config for anymal quadruped environment."""

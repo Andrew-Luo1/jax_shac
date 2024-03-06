@@ -260,6 +260,12 @@ class SHAC:
         self.training_step = checkify.checkify(self.training_step)
     
         self.training_epoch = jax.jit(self.training_epoch)
+        
+        # Code for debugging
+        self.jac_env_step = jax.jacfwd(self.jac_env_step, has_aux=True)
+        
+        self.jac_rollout = jax.jit(jax.vmap(self.jac_rollout,
+            in_axes=(None,)*2 + (0,)*2))
             
     def scramble_times(self, state, key):
         import numpy as np
@@ -339,6 +345,67 @@ class SHAC:
             discount=1 - nstate.done,
             next_observation=nstate.obs,
             extras={'state_extras': state_extras})
+    
+    # Jacobian-able
+    def jac_env_step(self, diffwrt, env_state, actions):
+        sys = self.env.sys
+        env_state = env_state.tree_replace({
+            'qpos': diffwrt[:sys.nq],
+            'qvel': diffwrt[sys.nq:sys.nq+sys.nv],
+            'ctrl': diffwrt[sys.nq+sys.nv:]
+        })
+        
+        nstate = self.env.step(env_state, actions)
+        diffwrt_out = jnp.squeeze(jnp.concatenate(
+                    [jnp.expand_dims(nstate.pipeline_state.qpos, 1), 
+                     jnp.expand_dims(nstate.pipeline_state.qvel, 1)],
+                     axis=0))
+        
+        return diffwrt_out, nstate
+    
+    def scannable_jac_env_step(self,
+        carry: Tuple[Union[envs.State, envs_v1.State], PRNGKey],
+        _step_index: int,
+        policy: types.Policy):
+        env_state, key = carry
+        key, key_sample = jax.random.split(key)
+        actions = policy(env_state.obs, key_sample)[0]
+        
+        mjx_data = env_state.pipeline_state
+        x_i = jnp.squeeze(
+                jnp.concatenate(
+                    [ mjx_data.qpos.reshape(self.env.sys.nq), 
+                      mjx_data.qvel.reshape(self.env.sys.nv),
+                      actions.reshape(1)], 
+                    axis=0))
+        
+        cur_jac, nstate = self.jac_env_step(x_i, env_state, self.env.sys)
+        
+        return (nstate, key), cur_jac
+        
+    def jac_rollout(self, policy_params, normalizer_params, state, key):
+        key, key_unroll = jax.random.split(key)
+        # As done in the paper to prevent gradient exposion.
+        state = jax.lax.stop_gradient(state)
+
+        # From Brax APG
+        f = functools.partial(
+            self.scannable_jac_env_step, policy=self.make_policy((normalizer_params, policy_params)))
+        
+        (_, _), jacs = jax.lax.scan(f, (state, key_unroll), (jnp.array(range(self.unroll_length))))
+        
+        return jacs
+    
+    def load_checkpoint(self, it):
+        """ 
+        Return the algo state for the specified iteration, saved under the checkpoints directory.
+        """
+
+        file_name = f'checkpoint_{it}.pkl'
+        file_path = str(Path(Path(__file__).parent,
+                        Path('checkpoints'),
+                        Path(file_name)))
+        return pickle.load(open(file_path, "rb"))
     
     def rollout_loss_fn(self,
         policy_params, value_params, 
@@ -755,7 +822,7 @@ class SHAC:
             # optimization
             epoch_key, local_key = jax.random.split(local_key)
 
-            # DEBUG: save state
+            # CHECKPOINT STARTING STATE
             algo_state = {
                 "epoch_key": epoch_key,
                 "local_key": local_key,
@@ -763,6 +830,15 @@ class SHAC:
                 "env_state": env_state
             }
 
+            epoch_start_env_time = env_state.pipeline_state.time[0]
+            epoch_start_state = env_state.pipeline_state.qpos[0, 0]
+
+            (training_state, env_state,
+                training_metrics) = self.training_epoch_with_timing(training_state, env_state, epoch_key)
+            
+            # CHECKPOINT THE KEYS THAT WERE USED
+            algo_state["unroll_keys"] = training_metrics['training/unroll_keys'][0] # Remove extra batch dim.
+            
             file_name = f'checkpoint_{it}.pkl' if self.save_all_checkpoints else 'checkpoint.pkl'
             save_to = str(Path(Path(__file__).parent,
                             Path('checkpoints'),
@@ -771,11 +847,6 @@ class SHAC:
             pickle.dump(algo_state, open(save_to, "wb"))
             
             print("Checkpointed for epoch {}".format(it))
-            epoch_start_env_time = env_state.pipeline_state.time[0]
-            epoch_start_state = env_state.pipeline_state.qpos[0, 0]
-
-            (training_state, env_state,
-                training_metrics) = self.training_epoch_with_timing(training_state, env_state, epoch_key)
             
             # VERIFY AUTODIFF
             if self.num_grad_checks is not None:

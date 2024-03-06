@@ -141,6 +141,8 @@ class SHAC:
         self.scramble_initial_times = scramble_initial_times
         self.polgrad_thresh = polgrad_thresh
         self.value_burn_in = value_burn_in
+        self.policy_init_params = policy_init_params
+        self.normalizer_init_params = normalizer_init_params
         
         #### misc
         self.training_walltime = 0
@@ -644,11 +646,13 @@ class SHAC:
         Uses the original key from __init__. 
         """
         
-        key_policy, key_value, key = jax.random.split(key)
+        key_policy, key_value, key = jax.random.split(key, 3)
 
-        if policy_init_params is None:
+        if self.policy_init_params is None:
             policy_init_params = self.shac_network.policy_network.init(key_policy)
-        if normalizer_init_params is None:
+        else:
+            policy_init_params = self.policy_init_params
+        if self.normalizer_init_params is None:
             if self.num_grad_checks is not None:
                 dtype = jnp.float64
             else:
@@ -656,7 +660,9 @@ class SHAC:
 
             normalizer_init_params = running_statistics.init_state(
                 specs.Array(self.env.observation_size, dtype))
-            
+        else:
+            normalizer_init_params = self.normalizer_init_params
+
         value_init_params = self.shac_network.value_network.init(key_value)
         if self.log_sigma is not None:
             policy_init_params = {
@@ -702,12 +708,12 @@ class SHAC:
 
         assert env_state.info['steps'].shape == p_shst
         
-        if not eval_env:
+        if not self.eval_env:
             eval_env = self.env
         else:
             # Not backpropping through, so no problem to just use vmapped env. 
             eval_env = orig_wraps.wrap(
-                eval_env, episode_length=self.episode_length
+                self.eval_env, episode_length=self.episode_length
             )
 
         training_state, key = self.init_training_state(key)

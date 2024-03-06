@@ -107,6 +107,7 @@ class SHAC:
                  policy_init_params = None,
                  normalizer_init_params = None,
                  save_all_checkpoints = False,
+                 save_all_policy_gradients = False,
                  value_burn_in = 0,
                  progress_fn: Callable[[int, Metrics], None] = lambda *args: None,
                  eval_env: Optional[envs.Env] = None,
@@ -128,6 +129,7 @@ class SHAC:
         self.tbx_logdir = tbx_logdir
         self.tbx_experiment_name = tbx_experiment_name
         self.save_all_checkpoints = save_all_checkpoints
+        self.save_all_policy_gradients = save_all_policy_gradients
         
         self.episode_length = episode_length
         self.num_grad_checks = num_grad_checks
@@ -800,6 +802,16 @@ class SHAC:
             epoch_end_env_time = env_state.pipeline_state.time[0]
             epoch_end_env_state = env_state.pipeline_state.qpos[0, 0]
 
+            #### Policy Gradient Saving ####
+            if self.save_all_policy_gradients:
+                file_name = f'bgrad_{it}.pkl'
+                save_to = str(Path(Path(__file__).parent,
+                                Path('policy_gradients'),
+                                Path(file_name)))
+                to_save = unvmap(training_metrics['training/b_policy_gradient'], 0) # Empty batch dim.
+
+                pickle.dump(to_save, open(save_to, "wb"))
+            
             #### TENSORBOARDING ####
             """ 
             Folders: 

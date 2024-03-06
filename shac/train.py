@@ -167,7 +167,7 @@ def train(environment: envs.Env,
     if resample_init:
         env = brax_wrappers.AutoSampleInitQ(env)
 
-    reset_fn = jax.jit(jax.vmap(env.reset))
+    reset_fn = jax.jit(jax.vmap(env.reset)) #@HERE; init
 
     normalize = lambda x, y: x
     if normalize_observations:
@@ -196,7 +196,7 @@ def train(environment: envs.Env,
         shac_losses.compute_shac_critic_loss,
         shac_network=shac_network)
 
-    compute_td_lambda_vals = jax.jit(shac_losses.compute_td_lambda_vals)
+    compute_td_lambda_vals = jax.jit(shac_losses.compute_td_lambda_vals) #@HERE: init
 
     value_gradient_update_fn = gradients.gradient_update_fn(
         value_loss_fn, value_optimizer, 
@@ -276,7 +276,7 @@ def train(environment: envs.Env,
         
         return jnp.sqrt(jnp.mean(jnp.square(ad_grads - fd_grads)))
     
-    fd_gradient_checks = jax.jit(checkify.checkify(fd_gradient_checks))
+    fd_gradient_checks = jax.jit(checkify.checkify(fd_gradient_checks)) #@HERE: init
     
     def env_step(
         carry: Tuple[Union[envs.State, envs_v1.State], PRNGKey],
@@ -413,7 +413,7 @@ def train(environment: envs.Env,
                 ), policy_params, optimizer_state
 
     policy_gradient_update_fn = jax.jit(
-        policy_gradient_update_fn)
+        policy_gradient_update_fn) # @HERE: init
     
     def critic_sgd_step(
         carry, x: Transition,

@@ -349,11 +349,13 @@ class SHAC:
     # Jacobian-able
     def jac_env_step(self, diffwrt, env_state, actions):
         sys = self.env.sys
-        env_state = env_state.tree_replace({
+        ps = env_state.pipeline_state
+        ps = ps.tree_replace({
             'qpos': diffwrt[:sys.nq],
             'qvel': diffwrt[sys.nq:sys.nq+sys.nv],
             'ctrl': diffwrt[sys.nq+sys.nv:]
         })
+        env_state = env_state.replace(pipeline_state=ps)
         
         nstate = self.env.step(env_state, actions)
         diffwrt_out = jnp.squeeze(jnp.concatenate(
@@ -379,9 +381,9 @@ class SHAC:
                       actions.reshape(1)], 
                     axis=0))
         
-        cur_jac, nstate = self.jac_env_step(x_i, env_state, self.env.sys)
-        
-        return (nstate, key), cur_jac
+        cur_jac, nstate = self.jac_env_step(x_i, env_state, actions)
+        extras = {"action": actions}
+        return (nstate, key), (cur_jac, nstate, extras)
         
     def jac_rollout(self, policy_params, normalizer_params, state, key):
         key, key_unroll = jax.random.split(key)
@@ -392,9 +394,9 @@ class SHAC:
         f = functools.partial(
             self.scannable_jac_env_step, policy=self.make_policy((normalizer_params, policy_params)))
         
-        (_, _), jacs = jax.lax.scan(f, (state, key_unroll), (jnp.array(range(self.unroll_length))))
+        (_, _), (jacs, nstates, extras) = jax.lax.scan(f, (state, key_unroll), (jnp.array(range(self.unroll_length))))
         
-        return jacs
+        return jacs, nstates, extras
     
     def load_checkpoint(self, it):
         """ 

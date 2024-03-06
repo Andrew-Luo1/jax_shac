@@ -431,7 +431,7 @@ class SHAC:
         flattened_bgrad, _ = ravel_pytree(bgrad)
         policy_metrics['p_nan_grads'] = jnp.sum(jnp.isnan(flattened_bgrad)) / flattened_bgrad.shape[0]
 
-        if self.num_grad_checks is not None:
+        if self.num_grad_checks is not None or self.save_all_policy_gradients == True:
             policy_metrics['b_policy_gradient'] = bgrad # For gradient checking. Don't store usually; can easily get to 60+ mb. 
         policy_metrics['unroll_keys'] = key
         

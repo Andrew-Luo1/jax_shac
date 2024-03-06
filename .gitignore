@@ -1,6 +1,7 @@
 # Logging
 /shac/tensorboards
 /shac/checkpoints
+/shac/policy_gradients
 
 # Not suitable for the public
 /todo.md

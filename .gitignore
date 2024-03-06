@@ -9,5 +9,6 @@
 # Misc
 /__pycache__
 /envs/__pycache__
+/envs/register_ahac_anymal_original.py
 /shac/__pycache__
 /utils/__pycache__

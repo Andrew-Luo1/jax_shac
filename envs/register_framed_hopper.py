@@ -36,9 +36,6 @@ class FramedHopper(MjxEnv):
         n_frames = 10 # 50 fps
         self.model = mj_model
         kwargs['physics_steps_per_control_step'] = kwargs.get('physics_steps_per_control_step', n_frames)
-        
-        # Also give the observation history.
-        self.num_history_steps = kwargs.get('num_history_steps', 3)
 
         super().__init__(mj_model=mj_model, **kwargs)
         assert self.sys.nq == 3, "Wrong model!"

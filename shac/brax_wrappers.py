@@ -16,14 +16,14 @@ from jax import numpy as jp
 
 class AppendObsHistory(Wrapper):
   
-  def __init__(self, env: Env):
+  def __init__(self, env: Env, **kwargs):
     super().__init__(env)
-    if 'num_history_steps' not in dir(self.env):
-      raise ValueError("Wrapped environment didn't specify number of history steps!")
-    
+    # if 'num_history_steps' not in dir(self.env):
+    #   raise ValueError("Wrapped environment didn't specify number of history steps!")
+    self.h = kwargs.get('h', 3)
+
     assert len(self.env.observation_size) == 1, "Haven't implemented history yet for multi-D observations."
     
-    self.num_history_steps = self.env.num_history_steps
     self.d_obs = self.env.observation_size[0]
 
   def reset(self, rng:jax.Array)->State:
@@ -36,7 +36,7 @@ class AppendObsHistory(Wrapper):
     state = self.env.reset(rng)
     cur_obs = state.obs
         
-    obs_hist = jp.zeros((self.num_history_steps, self.d_obs))
+    obs_hist = jp.zeros((self.h, self.d_obs))
     
     stacked_obs = self.stack_obs(cur_obs, obs_hist)
     state = state.replace(obs=stacked_obs)
@@ -50,7 +50,7 @@ class AppendObsHistory(Wrapper):
     return jp.concatenate([
       obs,
       jp.ravel(obs_history).reshape(
-        self.d_obs * self.num_history_steps)
+        self.d_obs * self.h)
     ])
     
   def step(self, state: State, action: jax.Array) -> State:
@@ -76,7 +76,7 @@ class AppendObsHistory(Wrapper):
   @property
   def observation_size(self) -> int:
     nom_obs_size = self.env.observation_size
-    return (nom_obs_size[0]*(self.num_history_steps + 1),)
+    return (nom_obs_size[0]*(self.h + 1),)
 
   
 class AutoSampleInitQ(Wrapper):

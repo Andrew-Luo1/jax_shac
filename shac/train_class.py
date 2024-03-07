@@ -194,7 +194,7 @@ class SHAC:
         # assert num_envs % device_count == 0
 
         env = environment
-        env = orig_wraps.AutoResetWrapper(orig_wraps.EpisodeWrapper(env, episode_length, action_repeat=1))
+        env = brax_wrappers.SGAutoResetWrapper(orig_wraps.EpisodeWrapper(env, episode_length, action_repeat=1))
         if resample_init:
             env = brax_wrappers.AutoSampleInitQ(env)
         

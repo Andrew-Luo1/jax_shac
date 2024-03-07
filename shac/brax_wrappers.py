@@ -109,9 +109,11 @@ class AutoSampleInitQ(Wrapper):
     state = self.env.step(state, action)
     return state
 
-class SGAutoResetWrapper(Wrapper):
+class AutoResetWrapper(Wrapper):
   """ Automatically resets Brax envs that are done.
-  Includes a stop gradient. """
+  Unmodified; just added comments.
+  Tracking the dones is a bit intricate; comments are given.
+     """
 
   def reset(self, rng: jax.Array) -> State:
     state = self.env.reset(rng)
@@ -124,20 +126,24 @@ class SGAutoResetWrapper(Wrapper):
       steps = state.info['steps']
       steps = jp.where(state.done, jp.zeros_like(steps), steps)
       state.info.update(steps=steps)
+    # s_k: reset the "done"
     state = state.replace(done=jp.zeros_like(state.done))
+    # s_k+1: get a new done signal
     state = self.env.step(state, action)
-
+    # wrap in the new done signal
     def where_done(x, y):
       done = state.done
       if done.shape:
         done = jp.reshape(done, [x.shape[0]] + [1] * (len(x.shape) - 1))  # type: ignore
       return jp.where(done, x, y)
 
+    # If s_k+1 was done, immediately reset the state.
     pipeline_state = jax.tree_map(
         where_done, state.info['first_pipeline_state'], state.pipeline_state
     )
     obs = where_done(state.info['first_obs'], state.obs)
-    return jax.lax.stop_gradient(state.replace(pipeline_state=pipeline_state, obs=obs))
+    # The done signal for s_k+1 exits the func. 
+    return state.replace(pipeline_state=pipeline_state, obs=obs)
 
 # def wrap(
 #     env: Env,

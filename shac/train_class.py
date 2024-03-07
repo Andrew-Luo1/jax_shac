@@ -46,6 +46,7 @@ from typeguard import typechecked as typechecker
 from . import losses as shac_losses # relative intra-package imports.
 from . import networks as shac_networks
 from . import brax_wrappers as brax_wrappers
+from jax_shac.utils.trainer_utils import fjac_env_step, fscannable_jac_env_step, fjac_rollout, fload_checkpoint, frender_states, fget_image
 
 InferenceParams = Tuple[running_statistics.NestedMeanStd, Params]
 Metrics = types.Metrics
@@ -149,6 +150,7 @@ class SHAC:
         
         #### misc
         self.training_walltime = 0
+        self.__file__ = __file__
         ####
         self.env_step_per_training_step = (
             num_envs * unroll_length)
@@ -267,7 +269,15 @@ class SHAC:
         
         self.jac_rollout = jax.jit(jax.vmap(self.jac_rollout,
             in_axes=(None,)*2 + (0,)*2 + (None,)), static_argnames="unroll_length")
-            
+    
+    # Import some code
+    jac_env_step = fjac_env_step
+    scannable_jac_env_step = fscannable_jac_env_step
+    jac_rollout = fjac_rollout
+    load_checkpoint = fload_checkpoint
+    render_states = frender_states
+    get_image = fget_image
+        
     def scramble_times(self, state, key):
         import numpy as np
         import copy
@@ -346,69 +356,6 @@ class SHAC:
             discount=1 - nstate.done,
             next_observation=nstate.obs,
             extras={'state_extras': state_extras})
-    
-    # Jacobian-able
-    def jac_env_step(self, diffwrt, env_state, actions):
-        sys = self.env.sys
-        ps = env_state.pipeline_state
-        ps = ps.tree_replace({
-            'qpos': diffwrt[:sys.nq],
-            'qvel': diffwrt[sys.nq:sys.nq+sys.nv],
-            'ctrl': diffwrt[sys.nq+sys.nv:]
-        })
-        env_state = env_state.replace(pipeline_state=ps)
-        
-        nstate = self.env.step(env_state, actions)
-        diffwrt_out = jnp.squeeze(jnp.concatenate(
-                    [jnp.expand_dims(nstate.pipeline_state.qpos, 1), 
-                     jnp.expand_dims(nstate.pipeline_state.qvel, 1)],
-                     axis=0))
-        
-        return diffwrt_out, nstate
-    
-    def scannable_jac_env_step(self,
-        carry: Tuple[Union[envs.State, envs_v1.State], PRNGKey],
-        _step_index: int,
-        policy: types.Policy):
-        env_state, key = carry
-        key, key_sample = jax.random.split(key)
-        actions = policy(env_state.obs, key_sample)[0]
-        
-        mjx_data = env_state.pipeline_state
-        x_i = jnp.squeeze(
-                jnp.concatenate(
-                    [ mjx_data.qpos.reshape(self.env.sys.nq), 
-                      mjx_data.qvel.reshape(self.env.sys.nv),
-                      actions.reshape(self.env.sys.nu)], 
-                    axis=0))
-        
-        cur_jac, nstate = self.jac_env_step(x_i, env_state, actions)
-        extras = {"action": actions}
-        return (nstate, key), (cur_jac, nstate, extras)
-        
-    def jac_rollout(self, policy_params, normalizer_params, state, key, unroll_length):
-        key, key_unroll = jax.random.split(key)
-        # As done in the paper to prevent gradient exposion.
-        state = jax.lax.stop_gradient(state)
-
-        # From Brax APG
-        f = functools.partial(
-            self.scannable_jac_env_step, policy=self.make_policy((normalizer_params, policy_params)))
-        
-        (_, _), (jacs, nstates, extras) = jax.lax.scan(f, (state, key_unroll), (jnp.array(range(unroll_length))))
-        
-        return jacs, nstates, extras
-    
-    def load_checkpoint(self, it):
-        """ 
-        Return the algo state for the specified iteration, saved under the checkpoints directory.
-        """
-
-        file_name = f'checkpoint_{it}.pkl'
-        file_path = str(Path(Path(__file__).parent,
-                        Path('checkpoints'),
-                        Path(file_name)))
-        return pickle.load(open(file_path, "rb"))
     
     def rollout_loss_fn(self,
         policy_params, value_params, 

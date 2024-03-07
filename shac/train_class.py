@@ -118,6 +118,7 @@ class SHAC:
         self.progress_fn = progress_fn
         self.eval_env = eval_env
         self.deterministic_eval = deterministic_eval
+        self.num_timesteps = num_timesteps
 
         self.num_envs = num_envs
         self.num_eval_envs = num_eval_envs
@@ -138,7 +139,7 @@ class SHAC:
         self.reward_scaling = reward_scaling
         self.lambda_ = lambda_
         self.log_sigma = log_sigma
-        
+
         # Tricks
         self.scramble_initial_times = scramble_initial_times
         self.polgrad_thresh = polgrad_thresh

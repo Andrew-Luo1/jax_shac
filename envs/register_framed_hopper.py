@@ -17,8 +17,11 @@ class FramedHopper(MjxEnv):
         """ 
         For sim stability, the ctrl is limited to 0, 1. 
         """
-        self.action_strength = 0.5
-        self.action_offset = 0.5
+        # Raw policy range is -1, 1.
+        action_pad = kwargs.get('action_pad', 0)
+        assert action_pad < 0.5, "Unreasonably large action padding"
+        self.action_strength = (1 - action_pad)/2
+        self.action_offset = action_pad + self.action_strength
 
         self.velocity_reward = 1.0
         self.action_reward = -0.2 # Make it negative.

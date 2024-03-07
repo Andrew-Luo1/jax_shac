@@ -89,6 +89,12 @@ def fget_image(self, mj_data, camera = None) -> np.ndarray:
     
   return self.renderer.render()
 
+def norm(l, axes):
+    ret = jnp.square(l)
+    ret = jnp.mean(ret, axis=axes)
+    ret = jnp.sqrt(ret)
+    return ret
+
 def frender_states(self, s0, nstates, jacs, thresh, camera=None):
     """ 
     If on step k, dx_{k+1}/dx_k is large, render the whole body as red.
@@ -101,24 +107,23 @@ def frender_states(self, s0, nstates, jacs, thresh, camera=None):
     - [X] Set them back to nominal otherwise
     """
     if "renderer" not in dir(self): # Only init once.
-        self.dir = mujoco.Renderer(self.env.model)
+        self.renderer = mujoco.Renderer(self.env.model)
     
     # Ensure that it's not batched across environments.
     assert len(jacs.shape) == 3, "wrong jacobians dimension; have you unbatched environnments?"
     jacs = np.array(jacs)
-    jac_mask = np.linalg.norm(jacs, axis=(1, 2), ord="fro")  > thresh
+    jac_mask = norm(jacs, axes=(1, 2))  > thresh
     
     mj_data0 = mjx.get_data(self.env.model, s0.pipeline_state)
     # Index i of mj_datas corresponds to i+1 of the rollout. 
     mj_datas = mjx.get_data(self.env.model, nstates.pipeline_state)
     mj_datas = [mj_data0] + mj_datas # Combine the lists
-    assert len(mj_datas) == len(nstates) + 1
     
     im_buf = []
     rgba_red = [1, 0, 0 ,1]
     rgba_grey = [0.5, 0.5, 0.5, 1]
 
-    for i, mj_data in enumerate(mj_datas):
+    for i, mj_data in enumerate(mj_datas[:-1]):
         if jac_mask[i]:
             self.env.model.geom_rgba = np.repeat(np.reshape(rgba_red, (1,4)), self.env.model.ngeom, axis=0)
         else:

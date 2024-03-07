@@ -15,7 +15,7 @@
     <material specular="0" shininess="0.25"/>
     <default class="anymal_c">
       <!-- <joint damping="5"/> -->
-      <joint damping="1" frictionloss="0.1"/>
+      <joint damping="1"/>
 
       <default class="visual">
         <geom type="mesh" contype="0" conaffinity="0" group="2"/>

@@ -266,7 +266,7 @@ class SHAC:
         self.jac_env_step = jax.jacfwd(self.jac_env_step, has_aux=True)
         
         self.jac_rollout = jax.jit(jax.vmap(self.jac_rollout,
-            in_axes=(None,)*2 + (0,)*2))
+            in_axes=(None,)*2 + (0,)*2 + (None,)), static_argnames="unroll_length")
             
     def scramble_times(self, state, key):
         import numpy as np
@@ -379,14 +379,14 @@ class SHAC:
                 jnp.concatenate(
                     [ mjx_data.qpos.reshape(self.env.sys.nq), 
                       mjx_data.qvel.reshape(self.env.sys.nv),
-                      actions.reshape(1)], 
+                      actions.reshape(self.env.sys.nu)], 
                     axis=0))
         
         cur_jac, nstate = self.jac_env_step(x_i, env_state, actions)
         extras = {"action": actions}
         return (nstate, key), (cur_jac, nstate, extras)
         
-    def jac_rollout(self, policy_params, normalizer_params, state, key):
+    def jac_rollout(self, policy_params, normalizer_params, state, key, unroll_length):
         key, key_unroll = jax.random.split(key)
         # As done in the paper to prevent gradient exposion.
         state = jax.lax.stop_gradient(state)
@@ -395,7 +395,7 @@ class SHAC:
         f = functools.partial(
             self.scannable_jac_env_step, policy=self.make_policy((normalizer_params, policy_params)))
         
-        (_, _), (jacs, nstates, extras) = jax.lax.scan(f, (state, key_unroll), (jnp.array(range(self.unroll_length))))
+        (_, _), (jacs, nstates, extras) = jax.lax.scan(f, (state, key_unroll), (jnp.array(range(unroll_length))))
         
         return jacs, nstates, extras
     

@@ -314,6 +314,12 @@
     <exclude body1="base" body2="RF_THIGH"/>
     <exclude body1="base" body2="LH_THIGH"/>
     <exclude body1="base" body2="RH_THIGH"/>
+    <exclude body1="LF_SHANK" body2="RF_SHANK"/>
+    <exclude body1="LF_SHANK" body2="LH_SHANK"/>
+    <exclude body1="RH_SHANK" body2="RF_SHANK"/>
+    <exclude body1="RH_SHANK" body2="LF_SHANK"/>
+    <exclude body1="LH_SHANK" body2="RF_SHANK"/>
+    <exclude body1="LH_SHANK" body2="RH_SHANK"/>
   </contact>
 
   <actuator>

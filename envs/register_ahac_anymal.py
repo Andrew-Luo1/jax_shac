@@ -369,18 +369,18 @@ class DiffAnymal(MjxEnv):
   def _reward_heading(self, obs) -> jax.Array:
     return obs[36]
   def _reward_height(self, obs) -> jax.Array:
-    return obs[0] - self.termination_height
+    return jp.clip(obs[0] - self.termination_height, -self.termination_height, 1) # Not going to be > 1 meter tall.
   def _reward_progress(self, obs) -> jax.Array:
-    return obs[5] # forward velocity
+    return jp.clip(obs[5], -10, 10) # forward velocity. Not going to be > 10 m/s!
   def _reward_action(self, action) -> jax.Array:
-    return jp.sqrt(jp.sum(jp.square(action)))
+    return jp.sqrt(jp.mean(jp.square(action)))
   def _reward_termination(
       self, done: jp.float32) -> jax.Array:
       return jp.where(done, 1.0, 0.0)
   def _reward_action_rate(
       self, act: jax.Array, last_act: jax.Array) -> jax.Array:
     # Penalize jerky motion
-    return jp.sqrt(jp.sum(jp.square(act - last_act)))
+    return jp.sqrt(jp.mean(jp.square(act - last_act)))
   def _reward_healthy(
       self, done: jp.float32) -> jax.Array:
     return jp.where(jp.logical_not(done), 1.0, 0.0)

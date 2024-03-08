@@ -62,7 +62,7 @@ class TrainingState:
   normalizer_params: running_statistics.RunningStatisticsState
   env_steps: jnp.ndarray
 
-extra_fields=('truncation',) # for def env_step
+extra_fields=('truncation','reward_tuple') # for def env_step
 
 def unvmap(x, ind):
     return jax.tree_util.tree_map(lambda x: x[ind], x)
@@ -216,7 +216,7 @@ class SHAC:
         else:
             self.make_policy = shac_networks.make_inference_fn(self.shac_network)
 
-        # betas, default learning rate, clipping agree with Xu. 
+        # betas, default learning rate, clipping agree with Xu. Note that Xu uses L2 clipping; Optax uses L1. 
         self.policy_optimizer = optax.chain(
             optax.clip(1.0),
             optax.adam(learning_rate=actor_learning_rate, b1=adam_b[0], b2=adam_b[1])
@@ -414,6 +414,9 @@ class SHAC:
             policy_params, value_params, normalizer_params,
             state, key)
         
+        # Pre-clip the gradients per environment.
+        bgrad = jax.tree_util.tree_map(lambda x: jnp.clip(x, -1, 1), bgrad)
+
         # Nans can occur upon hitting joint limits.
         policy_grad = jax.tree_util.tree_map(lambda x: jnp.nanmean(x, axis=0), bgrad)
 
@@ -443,9 +446,16 @@ class SHAC:
         state, data, policy_metrics = baux
 
         policy_metrics['policy_gradient'] = policy_grad
-
-        # What percentage of all values were nan?
+        
+        # How many ended up getting clipped?
         flattened_bgrad, _ = ravel_pytree(bgrad)
+        policy_metrics['p_clipped_grads'] = (
+            (jnp.sum(flattened_bgrad == -1)
+            + jnp.sum(flattened_bgrad == 1))
+            / flattened_bgrad.shape[0]
+        )
+        
+        # What percentage of all values were nan?
         policy_metrics['p_nan_grads'] = jnp.sum(jnp.isnan(flattened_bgrad)) / flattened_bgrad.shape[0]
 
         if self.num_grad_checks is not None or self.save_all_policy_gradients == True:
@@ -591,6 +601,9 @@ class SHAC:
 
         metrics.update(policy_metrics)
         #### DEBUG
+        metrics['reward_tuples'] = data.extras['state_extras']['reward_tuple']
+        agg = jnp.sqrt(jnp.mean(jnp.square(target_vals)))
+        metrics['target_value_params_size'] = agg
         agg = jnp.sqrt(jnp.mean(jnp.square(target_vals)))
         metrics['target_value_params_size'] = agg
         agg = jnp.sqrt(jnp.mean(jnp.square(next_values)))
@@ -854,6 +867,13 @@ class SHAC:
                 writer.add_scalar("env/Env 0 done", env_state.done[0], it)
                 writer.add_scalar("env/Env 0 height", env_state.pipeline_state.qpos[0, 2], it)
                 writer.add_scalar("env/Env 0 up", env_state.obs[0, 35], it)
+                # Rewards
+                rew_tup = training_metrics['training/reward_tuples']
+                ub_rew_tup = unvmap(rew_tup, 0)
+                for key, val in ub_rew_tup.items():
+                    assert val.size == self.unroll_length * self.num_envs, print(val)
+                    agg = jnp.mean(val)
+                    writer.add_scalar(f'rewards/Reward {key}', agg, it)
 
                 ## POLICY ##
                 act_s = training_metrics['training/action_size'][0]
@@ -871,6 +891,9 @@ class SHAC:
                 writer.add_scalar('policy/Entropy loss', avg_entropy_loss, it)
                 p_nan_grads = training_metrics['training/p_nan_grads'][0]
                 writer.add_scalar('policy/p_nan_grads', p_nan_grads, it)
+                p_clipped_grads = training_metrics['training/p_clipped_grads'][0]
+                writer.add_scalar('policy/p_clipped_grads', p_clipped_grads, it)
+                
                 ## CRITIC ##
                 td_lam = training_metrics['training/target_value_params_size'][0]
                 writer.add_scalar('critic/td_lam_value_norm', td_lam, it)

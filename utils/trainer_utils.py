@@ -52,7 +52,7 @@ def fscannable_jac_env_step(self,
     
     cur_jac, nstate = self.jac_env_step(x_i, env_state, actions)
     extras = {"action": actions}
-    return (nstate, key), (cur_jac, nstate, extras)
+    return (nstate, key), (cur_jac, env_state, extras)
     
 def fjac_rollout(self, policy_params, normalizer_params, state, key, unroll_length):
     key, key_unroll = jax.random.split(key)
@@ -63,9 +63,9 @@ def fjac_rollout(self, policy_params, normalizer_params, state, key, unroll_leng
     f = functools.partial(
         self.scannable_jac_env_step, policy=self.make_policy((normalizer_params, policy_params)))
     
-    (_, _), (jacs, nstates, extras) = jax.lax.scan(f, (state, key_unroll), (jnp.array(range(unroll_length))))
+    (state_h, _), (jacs, states, extras) = jax.lax.scan(f, (state, key_unroll), (jnp.array(range(unroll_length))))
     
-    return jacs, nstates, extras
+    return jacs, states, state_h, extras
 
 def fload_checkpoint(self, it):
     """ 
@@ -95,7 +95,7 @@ def norm(l, axes):
     ret = jnp.sqrt(ret)
     return ret
 
-def frender_states(self, s0, nstates, jacs, thresh, camera=None):
+def frender_states(self, states, jacs, thresh, camera=None):
     """ 
     If on step k, dx_{k+1}/dx_k is large, render the whole body as red.
     
@@ -114,16 +114,16 @@ def frender_states(self, s0, nstates, jacs, thresh, camera=None):
     jacs = np.array(jacs)
     jac_mask = norm(jacs, axes=(1, 2))  > thresh
     
-    mj_data0 = mjx.get_data(self.env.model, s0.pipeline_state)
+    # mj_data0 = mjx.get_data(self.env.model, s0.pipeline_state)
     # Index i of mj_datas corresponds to i+1 of the rollout. 
-    mj_datas = mjx.get_data(self.env.model, nstates.pipeline_state)
-    mj_datas = [mj_data0] + mj_datas # Combine the lists
+    mj_datas = mjx.get_data(self.env.model, states.pipeline_state)
+    # mj_datas = [mj_data0] + mj_datas # Combine the lists
     
     im_buf = []
     rgba_red = [1, 0, 0 ,1]
     rgba_grey = [0.5, 0.5, 0.5, 1]
 
-    for i, mj_data in enumerate(mj_datas[:-1]):
+    for i, mj_data in enumerate(mj_datas):
         if jac_mask[i]:
             self.env.model.geom_rgba = np.repeat(np.reshape(rgba_red, (1,4)), self.env.model.ngeom, axis=0)
         else:

@@ -13,6 +13,7 @@
 
 #### 1 DOF Hopper
 ![framed_hopper-ezgif com-video-to-gif-converter](https://github.com/Andrew-Luo1/jax_shac/assets/22626914/6edf23b4-6d68-4225-a73a-e473fc0d999a)
+
 ![image](https://github.com/Andrew-Luo1/jax_shac/assets/22626914/1e40905d-cc52-465e-90f5-038b46986ff7)
 
 *Run Time*: 1 min jit, 2 min training
@@ -23,11 +24,11 @@
 - Having great difficulty applying SHAC to get Anymal to walk.
 - Hypothesis: it's because quadruped gait is very contact-rich, leading to uninformative gradients.
 
-![image](https://github.com/Andrew-Luo1/jax_shac/assets/22626914/d774bea2-ef44-4370-8b77-b84594e780a4)
-![image](https://github.com/Andrew-Luo1/jax_shac/assets/22626914/6262b083-a2dc-4402-ac2e-0d25d76f5cb4)
-![image](https://github.com/Andrew-Luo1/jax_shac/assets/22626914/a939d83f-2075-4866-8a7a-0893ef892fdf){:width="300px" height="230px"}
+<img src="https://github.com/Andrew-Luo1/jax_shac/assets/22626914/d774bea2-ef44-4370-8b77-b84594e780a4" width="800">
+<img src="https://github.com/Andrew-Luo1/jax_shac/assets/22626914/6262b083-a2dc-4402-ac2e-0d25d76f5cb4" width="800">
+<img src="https://github.com/Andrew-Luo1/jax_shac/assets/22626914/a939d83f-2075-4866-8a7a-0893ef892fdf" width="600">
 
-![anymal_vid-ezgif com-video-to-gif-converter](https://github.com/Andrew-Luo1/jax_shac/assets/22626914/47b6561c-1a14-43fb-bfe0-a7d74361e6ec){:width="200px" height="150px"}
+![anymal_vid-ezgif com-video-to-gif-converter](https://github.com/Andrew-Luo1/jax_shac/assets/22626914/47b6561c-1a14-43fb-bfe0-a7d74361e6ec)
 
 *32-step rollout. Ground flashes red when step jacobian is greater than 10e2.*
   

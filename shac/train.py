@@ -46,6 +46,7 @@ from typeguard import typechecked as typechecker
 from . import losses as shac_losses # relative intra-package imports.
 from . import networks as shac_networks
 from . import brax_wrappers as brax_wrappers
+from jax_shac.utils.trainer_utils import fjac_env_step, fscannable_jac_env_step, fjac_rollout, fload_checkpoint, frender_states, fget_image
 
 InferenceParams = Tuple[running_statistics.NestedMeanStd, Params]
 Metrics = types.Metrics
@@ -61,7 +62,7 @@ class TrainingState:
   normalizer_params: running_statistics.RunningStatisticsState
   env_steps: jnp.ndarray
 
-extra_fields=('truncation',) # for def env_step
+extra_fields=('truncation','reward_tuple') # for def env_step
 
 def unvmap(x, ind):
     return jax.tree_util.tree_map(lambda x: x[ind], x)
@@ -69,157 +70,215 @@ def unvmap(x, ind):
 def to_float64(v): # Used for numerical differencing. 
     return jax.tree_util.tree_map(lambda x: jnp.array(x, dtype=jnp.float64), v)
 
-def train(environment: envs.Env,
-          num_timesteps: int,
-          episode_length: int,
-          num_envs: int = 1,
-          num_eval_envs: int = 128,
-          actor_learning_rate: float = 1e-2, # default for xu, cartpole
-          critic_learning_rate: float = 1e-3, # default for xu, cartpole
-          adam_b: Array = [0.7, 0.95],
-          entropy_cost: float = 1e-4,
-          discounting: float = 0.9,
-          seed: int = 0,
-          unroll_length: int = 10,
-          critic_batch_size: int = 5,
-          critic_epochs: int = 16,
-          num_evals: int = 1, # number of full evaluations; only done if num_tbx_evals = None. 
-          use_tbx = False, # number of tensorboardx evaluations; lighter than abv.
-          tbx_experiment_name = "",
-          tbx_logdir = "log",
-          scramble_initial_times = False,
-          normalize_observations: bool = False,
-          reward_scaling: float = 1.,
-          target_critic_alpha: float = 0.2,  # from xu: cartpole_swing_up
-          lambda_: float = .95,
-          deterministic_eval: bool = False,
-          network_factory: types.NetworkFactory[
-              shac_networks.SHACNetworks] = shac_networks.make_shac_networks,
-          log_sigma = None,
-          resample_init = False,
-          num_grad_checks = None, # number of random parameters to numerically differentiate every eval. 
-          policy_init_params = None,
-          normalizer_init_params = None,
-          save_all_checkpoints = False,
-          value_burn_in = 0,
-          progress_fn: Callable[[int, Metrics], None] = lambda *args: None,
-          eval_env: Optional[envs.Env] = None,
-          polgrad_thresh = 1e3):
-    
-    """SHAC training.
-    
-    Arguments:
-
-    value_burn_in: if you load in policy and normalizer parameters, the number of evals to run without updating the policy. Note the normalizer still gets updated, but only with the distribution of observations coming from the unchanged policy. 
+class SHAC:
+    """ 
+    Class version allows greater flexibility at cost of additional overhead.
 
     """
-    xt = time.time()
-    
-    if use_tbx:
-        algo_dir = Path(__file__).parent
-        log_dir = Path(algo_dir, Path("tensorboards"), Path(tbx_logdir), Path(tbx_experiment_name))
-        writer = SummaryWriter(str(log_dir))
-    
-    env_step_per_training_step = (
-        num_envs * unroll_length)
-    
-    print("Env steps per training step: {}".format(env_step_per_training_step))
-
-    num_evals_after_init = max(num_evals - 1, 1)
-
-    # The number of training_step calls per training_epoch call.
-    # equals to ceil(num_timesteps / (num_evals * env_step_per_training_step))
-    
-    num_training_steps_per_epoch = -(
-        -num_timesteps // (num_evals_after_init * env_step_per_training_step))
-
-    print("Training steps per epoch: {}".format(num_training_steps_per_epoch))
-
-    # Verify grads only designed for specific scenario. 
-    if num_grad_checks is not None:
-        assert num_training_steps_per_epoch == 1, "Gradient verification not supported for multi training steps per epoch"
-        assert log_sigma == None, "Gradient verification not supported for scalar variance"
+    def __init__(self,
+                 environment: envs.Env,
+                 num_timesteps: int,
+                 episode_length: int,
+                 num_envs: int = 1,
+                 num_eval_envs: int = 128,
+                 actor_learning_rate: float = 1e-2, # default for xu, cartpole
+                 critic_learning_rate: float = 1e-3, # default for xu, cartpole
+                 adam_b: Array = [0.7, 0.95],
+                 entropy_cost: float = 1e-4,
+                 discounting: float = 0.9,
+                 seed: int = 0,
+                 unroll_length: int = 10,
+                 critic_batch_size: int = 5,
+                 critic_epochs: int = 16,
+                 num_evals: int = 1, # number of full evaluations; only done if num_tbx_evals = None. 
+                 use_tbx = False, # number of tensorboardx evaluations; lighter than abv.
+                 tbx_experiment_name = "",
+                 tbx_logdir = "log",
+                 scramble_initial_times = False,
+                 normalize_observations: bool = False,
+                 reward_scaling: float = 1.,
+                 target_critic_alpha: float = 0.2,  # from xu: cartpole_swing_up
+                 lambda_: float = .95,
+                 deterministic_eval: bool = False,
+                 network_factory: types.NetworkFactory[
+                     shac_networks.SHACNetworks] = shac_networks.make_shac_networks,
+                 log_sigma = None,
+                 resample_init = False,
+                 num_grad_checks = None, # number of random parameters to numerically differentiate every eval. 
+                 policy_init_params = None,
+                 normalizer_init_params = None,
+                 save_all_checkpoints = False,
+                 save_all_policy_gradients = False,
+                 value_burn_in = 0,
+                 progress_fn: Callable[[int, Metrics], None] = lambda *args: None,
+                 eval_env: Optional[envs.Env] = None,
+                 polgrad_thresh = 1e3):
         
-        if num_grad_checks == 0: 
-            num_grad_checks = None
+        # Save to self
+        self.num_evals = num_evals
+        self.progress_fn = progress_fn
+        self.eval_env = eval_env
+        self.deterministic_eval = deterministic_eval
+        self.num_timesteps = num_timesteps
 
-        from jax import config
-        config.update("jax_enable_x64", True)
-        test_arr = jnp.zeros(1)
-        if test_arr.dtype != jnp.float64:
-            raise ValueError("Failed to set default Jax dtype to float64!")
+        self.num_envs = num_envs
+        self.num_eval_envs = num_eval_envs
+        self.seed = seed
+        self.critic_epochs = critic_epochs
+        self.target_critic_alpha = target_critic_alpha
 
-    # Convert everything to ints. 
-    critic_batch_size = int(critic_batch_size)
-    num_envs = int(num_envs)
-    num_timesteps = int(num_timesteps)
-    unroll_length = int(unroll_length)
+        self.use_tbx = use_tbx
+        self.tbx_logdir = tbx_logdir
+        self.tbx_experiment_name = tbx_experiment_name
+        self.save_all_checkpoints = save_all_checkpoints
+        self.save_all_policy_gradients = save_all_policy_gradients
+        
+        self.episode_length = episode_length
+        self.num_grad_checks = num_grad_checks
+        self.unroll_length = unroll_length
+        self.discounting = discounting
+        self.reward_scaling = reward_scaling
+        self.lambda_ = lambda_
+        self.log_sigma = log_sigma
 
-    # Used for critic epochs.
-    assert (num_envs*unroll_length) % critic_batch_size == 0
-    num_critic_minibatches = int((num_envs*unroll_length) / critic_batch_size)
+        # Tricks
+        self.scramble_initial_times = scramble_initial_times
+        self.polgrad_thresh = polgrad_thresh
+        self.value_burn_in = value_burn_in
+        self.policy_init_params = policy_init_params
+        self.normalizer_init_params = normalizer_init_params
+        
+        #### misc
+        self.training_walltime = 0
+        self.__file__ = __file__
+        ####
+        self.env_step_per_training_step = (
+            num_envs * unroll_length)
 
-    print("Critic minibatches per critic epoch: {}".format(num_critic_minibatches))
-    # assert num_envs % device_count == 0
+        print("Env steps per training step: {}".format(self.env_step_per_training_step))
+        self.num_evals_after_init = max(num_evals - 1, 1)
 
-    env = environment
-    env = orig_wraps.AutoResetWrapper(orig_wraps.EpisodeWrapper(env, episode_length, action_repeat=1))
-    if resample_init:
-        env = brax_wrappers.AutoSampleInitQ(env)
+        # The number of training_step calls per training_epoch call.
+        # equals to ceil(num_timesteps / (num_evals * env_step_per_training_step))
 
-    reset_fn = jax.jit(jax.vmap(env.reset)) #@HERE; init
+        self.num_training_steps_per_epoch = -(
+            -num_timesteps // (self.num_evals_after_init * self.env_step_per_training_step))
 
-    normalize = lambda x, y: x
-    if normalize_observations:
-        normalize = running_statistics.normalize
+        print("Training steps per epoch: {}".format(self.num_training_steps_per_epoch))
+
+        # Verify grads only designed for specific scenario. 
+        if num_grad_checks is not None:
+            assert self.num_training_steps_per_epoch == 1, "Gradient verification not supported for multi training steps per epoch"
+            assert log_sigma == None, "Gradient verification not supported for scalar variance"
+            
+            if num_grad_checks == 0: 
+                num_grad_checks = None
+
+            from jax import config
+            config.update("jax_enable_x64", True)
+            test_arr = jnp.zeros(1)
+            if test_arr.dtype != jnp.float64:
+                raise ValueError("Failed to set default Jax dtype to float64!")
+
+        # Convert everything to ints. 
+        self.critic_batch_size = int(critic_batch_size)
+        num_envs = int(num_envs)
+        num_timesteps = int(num_timesteps)
+        unroll_length = int(unroll_length)
+
+        # Used for critic epochs.
+        assert (num_envs*unroll_length) % self.critic_batch_size == 0
+        self.num_critic_minibatches = int((num_envs*unroll_length) / self.critic_batch_size)
+
+        print("Critic minibatches per critic epoch: {}".format(self.num_critic_minibatches))
+        # assert num_envs % device_count == 0
+
+        env = environment
+        env = brax_wrappers.AutoResetWrapper(orig_wraps.EpisodeWrapper(env, episode_length, action_repeat=1))
+        if resample_init:
+            env = brax_wrappers.AutoSampleInitQ(env)
+        
+        self.env = env
+        
+        self.reset_fn = jax.jit(jax.vmap(env.reset))
+
+        normalize = lambda x, y: x
+        if normalize_observations:
+            normalize = running_statistics.normalize
+        
+        self.shac_network = network_factory(
+            env.observation_size,
+            env.action_size,
+            preprocess_observations_fn=normalize)
+        
+        if log_sigma is not None:
+            self.make_policy = shac_networks.make_inference_fn_log_sigma(self.shac_network)
+        else:
+            self.make_policy = shac_networks.make_inference_fn(self.shac_network)
+
+        # betas, default learning rate, clipping agree with Xu. Note that Xu uses L2 clipping; Optax uses L1. 
+        self.policy_optimizer = optax.chain(
+            optax.clip(1.0),
+            optax.adam(learning_rate=actor_learning_rate, b1=adam_b[0], b2=adam_b[1])
+        )
+        self.value_optimizer = optax.chain(
+            optax.clip(1.0),
+            optax.adam(learning_rate=critic_learning_rate, b1=adam_b[0], b2=adam_b[1])
+        )
+        value_loss_fn = functools.partial(
+            shac_losses.compute_shac_critic_loss,
+            shac_network=self.shac_network)
+
+        self.compute_td_lambda_vals = jax.jit(shac_losses.compute_td_lambda_vals)
+
+        self.value_gradient_update_fn = gradients.gradient_update_fn(
+            value_loss_fn, self.value_optimizer, 
+            has_aux=True, pmap_axis_name=None)
+
+        self.policy_loss_fn = functools.partial(
+            shac_losses.compute_shac_policy_loss,
+            shac_network=self.shac_network,
+            discounting=discounting,
+            reward_scaling=reward_scaling)
+        
+        if log_sigma is not None:
+            entropy_loss_fn = shac_losses.compute_entropy_lnsig_loss
+        else:
+            entropy_loss_fn = shac_losses.compute_entropy_loss
+        
+        self.policy_entropy_loss_fn = functools.partial(
+            entropy_loss_fn,
+            shac_network=self.shac_network,
+            entropy_cost=entropy_cost)
+        
+        in_axes = (None,)*3 + (0,)*2
+        g_fn = jax.value_and_grad(self.rollout_loss_fn, has_aux=True)
+        self.vg_fn = jax.vmap(g_fn, in_axes=in_axes) # Expected output: b x 1
+        
+        self.policy_gradient_update_fn = jax.jit(
+            self.policy_gradient_update_fn)
+        
+        self.critic_epoch = jax.jit(self.critic_epoch)    
+        
+        self.training_step = checkify.checkify(self.training_step)
     
-    shac_network = network_factory(
-        env.observation_size,
-        env.action_size,
-        preprocess_observations_fn=normalize)
+        self.training_epoch = jax.jit(self.training_epoch)
+        
+        # Code for debugging
+        self.jac_env_step = jax.jacfwd(self.jac_env_step, has_aux=True)
+        
+        self.jac_rollout = jax.jit(jax.vmap(self.jac_rollout,
+            in_axes=(None,)*2 + (0,)*2 + (None,)), static_argnames="unroll_length")
     
-    if log_sigma is not None:
-        make_policy = shac_networks.make_inference_fn_log_sigma(shac_network)
-    else:
-        make_policy = shac_networks.make_inference_fn(shac_network)
-
-    # betas, default learning rate, clipping agree with Xu. 
-    policy_optimizer = optax.chain(
-        optax.clip(1.0),
-        optax.adam(learning_rate=actor_learning_rate, b1=adam_b[0], b2=adam_b[1])
-    )
-    value_optimizer = optax.chain(
-        optax.clip(1.0),
-        optax.adam(learning_rate=critic_learning_rate, b1=adam_b[0], b2=adam_b[1])
-    )
-    value_loss_fn = functools.partial(
-        shac_losses.compute_shac_critic_loss,
-        shac_network=shac_network)
-
-    compute_td_lambda_vals = jax.jit(shac_losses.compute_td_lambda_vals) #@HERE: init
-
-    value_gradient_update_fn = gradients.gradient_update_fn(
-        value_loss_fn, value_optimizer, 
-        has_aux=True, pmap_axis_name=None)
-
-    policy_loss_fn = functools.partial(
-        shac_losses.compute_shac_policy_loss,
-        shac_network=shac_network,
-        discounting=discounting,
-        reward_scaling=reward_scaling)
-    
-    if log_sigma is not None:
-        entropy_loss_fn = shac_losses.compute_entropy_lnsig_loss
-    else:
-        entropy_loss_fn = shac_losses.compute_entropy_loss
-    
-    policy_entropy_loss_fn = functools.partial(
-        entropy_loss_fn,
-        shac_network=shac_network,
-        entropy_cost=entropy_cost)
-
-
-    def scramble_times(state, key):
+    # Import some code
+    jac_env_step = fjac_env_step
+    scannable_jac_env_step = fscannable_jac_env_step
+    jac_rollout = fjac_rollout
+    load_checkpoint = fload_checkpoint
+    render_states = frender_states
+    get_image = fget_image
+        
+    def scramble_times(self, state, key):
         import numpy as np
         import copy
         
@@ -230,15 +289,15 @@ def train(environment: envs.Env,
         key = jax.random.PRNGKey(0)
         key, key_steps = jax.random.split(key)
 
-        steps = jnp.round(jax.random.uniform(key_steps, (num_envs,), maxval=episode_length))
+        steps = jnp.round(jax.random.uniform(key_steps, (self.num_envs,), maxval=self.episode_length))
         steps = jnp.array(steps, dtype=jnp.int32)
 
         info = copy.deepcopy(state.info)
         info['steps'] = steps
         
         return state.replace(info=info)
-
-    def fd_gradient_checks(
+    
+    def fd_gradient_checks(self,
         policy_params, value_params,
         normalizer_params, state, ind_key,
         unroll_key, ad_grads):
@@ -255,7 +314,7 @@ def train(environment: envs.Env,
         eps = 1e-7
         flattened_polp, polp_tree_fn = ravel_pytree(policy_params)
         flattened_ad_grads, _ = ravel_pytree(ad_grads)
-        rand_inds = jax.random.choice(ind_key, flattened_polp.shape[0], shape=(num_grad_checks,), replace=False)
+        rand_inds = jax.random.choice(ind_key, flattened_polp.shape[0], shape=(self.num_grad_checks,), replace=False)
         
         def fd_gradient_check(_, x):
             ind2eval = x
@@ -264,8 +323,8 @@ def train(environment: envs.Env,
             p_pert_pars = polp_tree_fn(flattened_polp.at[ind2eval].set(orig_val + eps))
             m_pert_pars = polp_tree_fn(flattened_polp.at[ind2eval].set(orig_val - eps))
 
-            p_pert_loss, _ = rollout_loss_fn(p_pert_pars, value_params, normalizer_params, state, unroll_key)
-            m_pert_loss, _ = rollout_loss_fn(m_pert_pars, value_params, normalizer_params, state, unroll_key)
+            p_pert_loss, _ = self.rollout_loss_fn(p_pert_pars, value_params, normalizer_params, state, unroll_key)
+            m_pert_loss, _ = self.rollout_loss_fn(m_pert_pars, value_params, normalizer_params, state, unroll_key)
             
             fd_grad = (p_pert_loss - m_pert_loss) / (2*eps)
             
@@ -276,9 +335,9 @@ def train(environment: envs.Env,
         
         return jnp.sqrt(jnp.mean(jnp.square(ad_grads - fd_grads)))
     
-    fd_gradient_checks = jax.jit(checkify.checkify(fd_gradient_checks)) #@HERE: init
+    fd_gradient_checks = jax.jit(checkify.checkify(fd_gradient_checks))
     
-    def env_step(
+    def env_step(self,
         carry: Tuple[Union[envs.State, envs_v1.State], PRNGKey],
         _step_index: int,
         policy: types.Policy):
@@ -288,7 +347,7 @@ def train(environment: envs.Env,
         env_state, key = carry
         key, key_sample = jax.random.split(key)
         actions = policy(env_state.obs, key_sample)[0]
-        nstate = env.step(env_state, actions)
+        nstate = self.env.step(env_state, actions)
         state_extras = {x: nstate.info[x] for x in extra_fields}
         return (nstate, key), Transition(
             observation=env_state.obs,
@@ -297,8 +356,8 @@ def train(environment: envs.Env,
             discount=1 - nstate.done,
             next_observation=nstate.obs,
             extras={'state_extras': state_extras})
-
-    def rollout_loss_fn(
+    
+    def rollout_loss_fn(self,
         policy_params, value_params, 
         normalizer_params, state, 
         key):
@@ -316,19 +375,19 @@ def train(environment: envs.Env,
 
         # From Brax APG
         f = functools.partial(
-            env_step, policy=make_policy((normalizer_params, policy_params)))
+            self.env_step, policy=self.make_policy((normalizer_params, policy_params)))
         
-        (state_h, key), data = jax.lax.scan(f, (state, key_unroll), (jnp.array(range(unroll_length))))
+        (state_h, key), data = jax.lax.scan(f, (state, key_unroll), (jnp.array(range(self.unroll_length))))
         
         key, key_entropy = jax.random.split(key)
-        policy_loss, metrics = policy_loss_fn(
+        policy_loss, metrics = self.policy_loss_fn(
             value_params=value_params,
             normalizer_params=normalizer_params,
             data=data,
             last_state=state_h
         )
         
-        entropy_loss = policy_entropy_loss_fn(
+        entropy_loss = self.policy_entropy_loss_fn(
             policy_params=policy_params,
             normalizer_params=normalizer_params,
             data=data,
@@ -339,26 +398,25 @@ def train(environment: envs.Env,
         loss = policy_loss+entropy_loss
 
         return loss.reshape(), (state_h, data, metrics)
-        
-    in_axes = (None,)*3 + (0,)*2
-    g_fn = jax.value_and_grad(rollout_loss_fn, has_aux=True)
-    vg_fn = jax.vmap(g_fn, in_axes=in_axes) # Expected output: b x 1
-        
-    def policy_gradient_update_fn(
+            
+    def policy_gradient_update_fn(self,
         policy_params, value_params, 
         normalizer_params, state, key,
         optimizer_state, env_steps):
-        
+
         # Ensure that state and key are batched. 
         @jaxtyped(typechecker=typechecker)
         def ensure_batched(obs: Shaped[Array, "b obs"], key: Shaped[Array, "b 2"]):
             pass
         ensure_batched(state.obs, key)
 
-        (bvalue, baux), bgrad = vg_fn(
+        (bvalue, baux), bgrad = self.vg_fn(
             policy_params, value_params, normalizer_params,
             state, key)
         
+        # Pre-clip the gradients per environment.
+        bgrad = jax.tree_util.tree_map(lambda x: jnp.clip(x, -1, 1), bgrad)
+
         # Nans can occur upon hitting joint limits.
         policy_grad = jax.tree_util.tree_map(lambda x: jnp.nanmean(x, axis=0), bgrad)
 
@@ -366,7 +424,7 @@ def train(environment: envs.Env,
         agg = jnp.sqrt(jnp.mean(jnp.square(flattened_vals)))
         # jax.debug.print("Gradient norm = {x}", x=agg)
         check1 = jnp.where(agg > 1e-6, 0, 1) # Default python comparators don't work; traced bool error. 
-        check2 = jnp.where(agg < polgrad_thresh, 0, 1)
+        check2 = jnp.where(agg < self.polgrad_thresh, 0, 1)
         check3 = jnp.isnan(agg)
 
         checkify.check(check1 == 0,
@@ -379,7 +437,7 @@ def train(environment: envs.Env,
                        check3=check3)
         
         # Optimizer step
-        params_update, noptimizer_state = policy_optimizer.update(
+        params_update, noptimizer_state = self.policy_optimizer.update(
             policy_grad, optimizer_state)
         npolicy_params = optax.apply_updates(
             policy_params, params_update)
@@ -388,18 +446,25 @@ def train(environment: envs.Env,
         state, data, policy_metrics = baux
 
         policy_metrics['policy_gradient'] = policy_grad
-
-        # What percentage of all values were nan?
+        
+        # How many ended up getting clipped?
         flattened_bgrad, _ = ravel_pytree(bgrad)
+        policy_metrics['p_clipped_grads'] = (
+            (jnp.sum(flattened_bgrad == -1)
+            + jnp.sum(flattened_bgrad == 1))
+            / flattened_bgrad.shape[0]
+        )
+        
+        # What percentage of all values were nan?
         policy_metrics['p_nan_grads'] = jnp.sum(jnp.isnan(flattened_bgrad)) / flattened_bgrad.shape[0]
 
-        if num_grad_checks is not None:
+        if self.num_grad_checks is not None or self.save_all_policy_gradients == True:
             policy_metrics['b_policy_gradient'] = bgrad # For gradient checking. Don't store usually; can easily get to 60+ mb. 
         policy_metrics['unroll_keys'] = key
         
         # Value function burn-in: we don't update the policy. Update_policy must be int. 
-        n_train_step = env_steps / env_step_per_training_step
-        update_policy = jnp.where(jnp.logical_and(agg < polgrad_thresh , (n_train_step >= value_burn_in)), 1, 0)
+        n_train_step = env_steps / self.env_step_per_training_step
+        update_policy = jnp.where(jnp.logical_and(agg < self.polgrad_thresh , (n_train_step >= self.value_burn_in)), 1, 0)
         
         policy_params = jax.tree_util.tree_map(
             lambda x, y: x * update_policy + y * (1-update_policy), 
@@ -412,17 +477,14 @@ def train(environment: envs.Env,
         return (policy_loss, (state, data, policy_metrics)
                 ), policy_params, optimizer_state
 
-    policy_gradient_update_fn = jax.jit(
-        policy_gradient_update_fn) # @HERE: init
-    
-    def critic_sgd_step(
+    def critic_sgd_step(self,
         carry, x: Transition,
         normalizer_params: running_statistics.RunningStatisticsState):
         
         obs, target_vals = x
         optimizer_state, params, key = carry
         key, key_loss = jax.random.split(key)
-        (_, metrics), params, optimizer_state = value_gradient_update_fn(
+        (_, metrics), params, optimizer_state = self.value_gradient_update_fn(
             params,
             normalizer_params,
             obs,
@@ -430,18 +492,16 @@ def train(environment: envs.Env,
             optimizer_state=optimizer_state)
 
         return (optimizer_state, params, key), metrics
-
-    def critic_epoch(carry, unused_t, target_vals, obs: jnp.ndarray,
+    
+    def critic_epoch(self,
+                     carry, unused_t, target_vals, obs: jnp.ndarray,
                 normalizer_params: running_statistics.RunningStatisticsState):
-        """ 
-        1 epoch defined as 1 full pass through the data.
-        target_vals: pre-computed out of data via TD-lambda. 
-        """
         optimizer_state, params, key = carry
+
         key, key_perm, key_grad = jax.random.split(key, 3)
 
         def convert_data(x: jnp.ndarray):
-            x = jnp.reshape(x, (num_critic_minibatches, critic_batch_size, -1))
+            x = jnp.reshape(x, (self.num_critic_minibatches, self.critic_batch_size, -1))
             x = jax.random.permutation(key_perm, x)
 
             return x
@@ -458,22 +518,15 @@ def train(environment: envs.Env,
         # check_tv(shuffled_target_vals, shuffled_data.observation)
         
         (optimizer_state, params, _), metrics = jax.lax.scan(
-            functools.partial(critic_sgd_step, normalizer_params=normalizer_params),
+            functools.partial(self.critic_sgd_step, normalizer_params=normalizer_params),
             (optimizer_state, params, key_grad),
             (shuffled_obs, shuffled_target_vals),
-            length=num_critic_minibatches)
+            length=self.num_critic_minibatches)
         return (optimizer_state, params, key), metrics
 
-    critic_epoch = jax.jit(critic_epoch)
-    
-    def training_step(
+    def training_step(self,
         carry: Tuple[TrainingState, envs.State, PRNGKey],
         unused_t) -> Tuple[Tuple[TrainingState, envs.State, PRNGKey], Metrics]:
-        """
-        (Batched across envs) 
-        1. Update policy & get data
-        2. Update critic with that data
-        """
         
         training_state, state, key = carry
         
@@ -485,8 +538,9 @@ def train(environment: envs.Env,
 
         key = key.reshape(2) # TODO: Remove
         key_sgd, key_generate_unroll, new_key = jax.random.split(key, 3)
-        key_generate_unroll = jax.random.split(key_generate_unroll, num_envs)
-        (_, (state, data, policy_metrics)), policy_params, policy_optimizer_state = policy_gradient_update_fn(
+        key_generate_unroll = jax.random.split(key_generate_unroll, self.num_envs)
+        (_, (state, data, policy_metrics)
+            ), policy_params, policy_optimizer_state = self.policy_gradient_update_fn(
             training_state.policy_params, training_state.target_value_params,
             training_state.normalizer_params, state, key_generate_unroll,
             optimizer_state=training_state.policy_optimizer_state, 
@@ -506,23 +560,23 @@ def train(environment: envs.Env,
             data.observation)
         
         # A) Value function burn-in: we don't update the normalizer.
-        n_train_step = training_state.env_steps / env_step_per_training_step
+        n_train_step = training_state.env_steps / self.env_step_per_training_step
         # B) Don't update normalizer if policy grad blew up. 
         policy_grad = policy_metrics['policy_gradient']
         flattened_vals, _ = ravel_pytree(policy_grad)
         agg = jnp.sqrt(jnp.mean(jnp.square(flattened_vals)))
 
-        update_policy = jnp.where(jnp.logical_and(agg < polgrad_thresh, n_train_step >= value_burn_in), 1, 0)
+        update_policy = jnp.where(jnp.logical_and(agg < self.polgrad_thresh, n_train_step >= self.value_burn_in), 1, 0)
 
         normalizer_params = jax.tree_util.tree_map(
             lambda x, y: x * update_policy + y * (1-update_policy),
             n_normalizer_params, training_state.normalizer_params)
 
-        target_vals = compute_td_lambda_vals(data,
+        target_vals = self.compute_td_lambda_vals(data,
                                              next_values,
-                                             discounting,
-                                             reward_scaling,
-                                             lambda_)
+                                             self.discounting,
+                                             self.reward_scaling,
+                                             self.lambda_)
         
         # CHECK target_vals
         @jaxtyped(typechecker=typechecker)
@@ -533,20 +587,23 @@ def train(environment: envs.Env,
         # Partial is used to pass constants through scans. 
         # Re-initialize the critic for fresh fits every time. Has been observed to improve critic stability.
         key_sgd, key_init_value = jax.random.split(key_sgd)
-        value_params = shac_network.value_network.init(key_init_value)
-        value_optimizer_state = value_optimizer.init(value_params)
+        value_params = self.shac_network.value_network.init(key_init_value)
+        value_optimizer_state = self.value_optimizer.init(value_params)
 
-        pcritic_epoch = functools.partial(critic_epoch, obs=data.observation, normalizer_params=normalizer_params, target_vals=target_vals)
+        pcritic_epoch = functools.partial(self.critic_epoch, obs=data.observation, normalizer_params=normalizer_params, target_vals=target_vals)
 
-        (value_optimizer_state, value_params, _), metrics = jax.lax.scan(pcritic_epoch, (value_optimizer_state, value_params, key_sgd), (), length=critic_epochs)
+        (value_optimizer_state, value_params, _), metrics = jax.lax.scan(pcritic_epoch, (value_optimizer_state, value_params, key_sgd), (), length=self.critic_epochs)
 
         # Alpha usually < 0.5, so you mostly keep the new critic.
         target_value_params = jax.tree_util.tree_map(
-            lambda x, y: x * target_critic_alpha + y * (1-target_critic_alpha), training_state.target_value_params,
+            lambda x, y: x * self.target_critic_alpha + y * (1-self.target_critic_alpha), training_state.target_value_params,
             value_params)
 
         metrics.update(policy_metrics)
         #### DEBUG
+        metrics['reward_tuples'] = data.extras['state_extras']['reward_tuple']
+        agg = jnp.sqrt(jnp.mean(jnp.square(target_vals)))
+        metrics['target_value_params_size'] = agg
         agg = jnp.sqrt(jnp.mean(jnp.square(target_vals)))
         metrics['target_value_params_size'] = agg
         agg = jnp.sqrt(jnp.mean(jnp.square(next_values)))
@@ -561,44 +618,38 @@ def train(environment: envs.Env,
             value_params=value_params,
             target_value_params=target_value_params,
             normalizer_params=normalizer_params,
-            env_steps=training_state.env_steps + env_step_per_training_step)
+            env_steps=training_state.env_steps + self.env_step_per_training_step)
         return (new_training_state, state, new_key), metrics
-
-    training_step = checkify.checkify(training_step)
-
-    def training_step_wrapper(
+    
+    def training_step_wrapper(self,
         carry: Tuple[TrainingState, envs.State, PRNGKey],
         unused_t) -> Tuple[Tuple[TrainingState, envs.State, PRNGKey], Metrics]:
         """ 
         If not for this, only 1 checkify error per epoch can get returned. Now it's 1 error per training step.
         """
-        err, (c, x) = training_step(carry, unused_t)
+        err, (c, x) = self.training_step(carry, unused_t)
         return c, (x, err)
     
-    # Keep it jittable!
-    def training_epoch(training_state: TrainingState, state: envs.State,
+    def training_epoch(self, training_state: TrainingState, state: envs.State,
                         key: PRNGKey) -> Tuple[TrainingState, envs.State, Metrics]:
         """ 
         Run a bunch of training steps (policy updates).
         """
         (training_state, state, _), (loss_metrics, err) = jax.lax.scan(
-            training_step_wrapper, (training_state, state, key), (),
-            length=num_training_steps_per_epoch)
+            self.training_step_wrapper, (training_state, state, key), (),
+            length=self.num_training_steps_per_epoch)
             # loss_metrics = jax.tree_util.tree_map(jnp.mean, loss_metrics)
         return training_state, state, loss_metrics, err
 
-    training_epoch = jax.jit(training_epoch)
-
-    # Note that this is NOT a pure jittable method.
-    def training_epoch_with_timing(
+    def training_epoch_with_timing(self,
         training_state: TrainingState, env_state: envs.State,
         key: PRNGKey) -> Tuple[TrainingState, envs.State, Metrics]:
+        
         """ 
         Wrapper around training_epoch to time it.
         """
-        nonlocal training_walltime
         t = time.time()
-        training_state, env_state, metrics, err = training_epoch(
+        training_state, env_state, metrics, err = self.training_epoch(
             training_state, env_state, key)
         
         jax.tree_util.tree_map(lambda x: x.block_until_ready(), metrics)
@@ -611,216 +662,263 @@ def train(environment: envs.Env,
 
         #### TIMING ####
         epoch_training_time = time.time() - t
-        training_walltime += epoch_training_time
-        sps = (num_training_steps_per_epoch *
-                env_step_per_training_step) / epoch_training_time
+        self.training_walltime += epoch_training_time
+        sps = (self.num_training_steps_per_epoch *
+                self.env_step_per_training_step) / epoch_training_time
         metrics = {
             'training/sps': sps,
-            'training/walltime': training_walltime,
+            'training/walltime': self.training_walltime,
             **{f'training/{name}': value for name, value in metrics.items()}
         }
 
         return training_state, env_state, metrics
-
-
-    key = jax.random.PRNGKey(seed)
-    global_key, local_key = jax.random.split(key)
-    del key
-    local_key, key_env, eval_key = jax.random.split(local_key, 3)
-    # key_networks should be global, so that networks are initialized the same
-    # way for different processes.
-    key_policy, key_value = jax.random.split(global_key)
-    del global_key
-
-    if policy_init_params is None:
-        policy_init_params = shac_network.policy_network.init(key_policy)
-    if normalizer_init_params is None:
-        if num_grad_checks is not None:
-            dtype = jnp.float64
-        else:
-            dtype = jnp.float32
-
-        normalizer_init_params = running_statistics.init_state(
-            specs.Array(env.observation_size, dtype))
-        
-    value_init_params = shac_network.value_network.init(key_value)
-    if log_sigma is not None:
-        policy_init_params = {
-            "policy_network_params": policy_init_params,
-            "policy_lnsig_params": jax.numpy.ones(env.action_size) * log_sigma
-        }
     
-    training_state = TrainingState(
-        policy_optimizer_state=policy_optimizer.init(policy_init_params),
-        policy_params=policy_init_params,
-        value_optimizer_state=value_optimizer.init(value_init_params),
-        value_params=value_init_params,
-        target_value_params=value_init_params,
-        normalizer_params=normalizer_init_params,
-        env_steps=0)
-
-    key_envs = jax.random.split(key_env, num_envs)
-    env_state = reset_fn(key_envs)
-    p_shst = env_state.info['steps'].shape
-
-    if scramble_initial_times:
-        key_env, key_scramble = jax.random.split(key_env)
-        env_state = scramble_times(env_state, key_scramble)
-
-    assert env_state.info['steps'].shape == p_shst
-    
-    if not eval_env:
-        eval_env = env
-    else:
-        # Not backpropping through, so no problem to just use vmapped env. 
-        eval_env = orig_wraps.wrap(
-            eval_env, episode_length=episode_length
-        )
-
-    evaluator = acting.Evaluator(
-        eval_env,
-        functools.partial(make_policy, deterministic=deterministic_eval),
-        num_eval_envs=num_eval_envs,
-        episode_length=episode_length,
-        action_repeat=1,
-        key=eval_key)
-
-    # # Run initial eval
-    if num_evals > 1:
-        t0 = time.time()
-        metrics = evaluator.run_evaluation(
-            (training_state.normalizer_params, training_state.policy_params),
-            training_metrics={})
-        logging.info(metrics)
-        print("Initial eval time: {:.4f} s".format(time.time() - t0))
-        progress_fn(0, metrics)
-
-    training_walltime = 0
-    current_step = 0
-    
-    # Delete previous checkpoints
-    print("Deleting old checkpoints!")
-    top = Path(Path(__file__).parent,
-               Path('checkpoints'))
-    for constituent in top.iterdir():
-        constituent.unlink()
-    
-    for it in range(num_evals_after_init):
-        logging.info('starting iteration %s %s', it, time.time() - xt)
-
-        # optimization
-        epoch_key, local_key = jax.random.split(local_key)
-
-        # DEBUG: save state
-        algo_state = {
-            "epoch_key": epoch_key,
-            "local_key": local_key,
-            "training_state": training_state,
-            "env_state": env_state
-        }
-
-        file_name = f'checkpoint_{it}.pkl' if save_all_checkpoints else 'checkpoint.pkl'
-        save_to = str(Path(Path(__file__).parent,
-                           Path('checkpoints'),
-                           Path(file_name)))
-                              
-        pickle.dump(algo_state, open(save_to, "wb"))
-        
-        print("Checkpointed for epoch {}".format(it))
-        epoch_start_env_time = env_state.pipeline_state.time[0]
-        epoch_start_state = env_state.pipeline_state.qpos[0, 0]
-
-        (training_state, env_state,
-            training_metrics) = training_epoch_with_timing(training_state, env_state, epoch_key)
-        
-        # VERIFY AUTODIFF
-        if num_grad_checks is not None:
-            pre_update = pickle.load(open(save_to, "rb"))
-            pts = pre_update['training_state']
-            key_ub, key_ind, epoch_key = jax.random.split(epoch_key, 3)
-            i_ub = jax.random.choice(key_ub, num_envs)
-            
-            state = unvmap(pre_update['env_state'], i_ub)
-            ad_grads_extradim = training_metrics['training/b_policy_gradient']
-            ad_grads = unvmap(ad_grads_extradim, 0) # batched across episodes
-            ad_grads_ub = unvmap(ad_grads, i_ub)
-
-            unroll_key = unvmap(training_metrics['training/unroll_keys'][0], i_ub)
-            
-            _checkify_err, grad_err = fd_gradient_checks(pts.policy_params, pts.value_params, 
-                                          pts.normalizer_params, state, 
-                                          key_ind, unroll_key, ad_grads_ub)
-            
-            writer.add_scalar('policy/autodiff_error', grad_err, it)
-            
-        current_step = int(training_state.env_steps)
-
-        epoch_end_env_time = env_state.pipeline_state.time[0]
-        epoch_end_env_state = env_state.pipeline_state.qpos[0, 0]
-
-        #### TENSORBOARDING ####
+    def init_training_state(self, key):
         """ 
-        Folders: 
-        - env
-        - policy
-        - critic
+        Uses the original key from __init__. 
         """
         
-        # Get rid of batch dim from def training_epoch
-        # metrics = jax.tree_util.tree_map(lambda x: x[0], metrics)
+        key_policy, key_value, key = jax.random.split(key, 3)
+
+        if self.policy_init_params is None:
+            policy_init_params = self.shac_network.policy_network.init(key_policy)
+        else:
+            policy_init_params = self.policy_init_params
+        if self.normalizer_init_params is None:
+            if self.num_grad_checks is not None:
+                dtype = jnp.float64
+            else:
+                dtype = jnp.float32
+
+            normalizer_init_params = running_statistics.init_state(
+                specs.Array(self.env.observation_size, dtype))
+        else:
+            normalizer_init_params = self.normalizer_init_params
+
+        value_init_params = self.shac_network.value_network.init(key_value)
+        if self.log_sigma is not None:
+            policy_init_params = {
+                "policy_network_params": policy_init_params,
+                "policy_lnsig_params": jax.numpy.ones(self.env.action_size) * self.log_sigma
+            }
         
-        if use_tbx:
-            ## ENV ##
-            writer.add_scalar("env/Starting env 0 time", epoch_start_env_time, it)
-            writer.add_scalar("env/Ending env 0 time", epoch_end_env_time, it)
-            writer.add_scalar("env/Starting env 0 state", epoch_start_state, it)
-            writer.add_scalar("env/Ending env 0 state", epoch_end_env_state, it)
-            # Additional debug
-            writer.add_scalar("env/Env 0 done", env_state.done[0], it)
-            writer.add_scalar("env/Env 0 height", env_state.pipeline_state.qpos[0, 2], it)
-            writer.add_scalar("env/Env 0 up", env_state.obs[0, 35], it)
+        training_state = TrainingState(
+            policy_optimizer_state=self.policy_optimizer.init(policy_init_params),
+            policy_params=policy_init_params,
+            value_optimizer_state=self.value_optimizer.init(value_init_params),
+            value_params=value_init_params,
+            target_value_params=value_init_params,
+            normalizer_params=normalizer_init_params,
+            env_steps=0)
 
-            ## POLICY ##
-            act_s = training_metrics['training/action_size'][0]
-            writer.add_scalar('policy/action size', act_s, it)
-            ub_pg = jax.tree_util.tree_map(lambda x: x[0], 
-                                        training_metrics['training/policy_gradient'])
-            flattened_vals, _ = ravel_pytree(ub_pg)
-            policy_grad_size = jnp.sqrt(jnp.mean(jnp.square(flattened_vals)))
-            writer.add_scalar('policy/||Policy gradient||', policy_grad_size, it)
-            # if jnp.isnan(policy_grad_size):
-            #     raise ValueError("Nan policy gradient!")
-            avg_policy_loss = training_metrics['training/policy_loss'][0].mean()
-            writer.add_scalar('policy/Policy loss', avg_policy_loss, it)
-            avg_entropy_loss = training_metrics['training/entropy_loss'][0].mean()
-            writer.add_scalar('policy/Entropy loss', avg_entropy_loss, it)
-            p_nan_grads = training_metrics['training/p_nan_grads'][0]
-            writer.add_scalar('policy/p_nan_grads', p_nan_grads, it)
-            ## CRITIC ##
-            td_lam = training_metrics['training/target_value_params_size'][0]
-            writer.add_scalar('critic/td_lam_value_norm', td_lam, it)
-            crit_s = training_metrics['training/target_critic_output_size'][0]
-            writer.add_scalar('critic/critic output size', crit_s, it)
-            last_critic_loss = (training_metrics['training/v_loss'][0].mean(axis=1))[-1] # 16 x 256
-            writer.add_scalar('critic/Last epoch critic loss', last_critic_loss, it)
-            
-            ## Timing
-            writer.add_scalar("sps", training_metrics['training/sps'], it)
-            writer.add_scalar('Wall-Clock Time', training_metrics['training/walltime'], it)
+        return training_state, key
 
-        if not use_tbx:
+    def train(self):
+        """ 
+        1. Init batched environment states
+        2. Init training state
+        3. Run initial eval
+        4. Delete old checkpoints
+        5. Train while logging
+        """
+        xt = time.time()
+        key = jax.random.PRNGKey(self.seed)
+        key_env, key = jax.random.split(key)
+        
+        if self.use_tbx:
+            algo_dir = Path(__file__).parent
+            log_dir = Path(algo_dir, Path("tensorboards"), Path(self.tbx_logdir), Path(self.tbx_experiment_name))
+            writer = SummaryWriter(str(log_dir))
+        
+        key_envs = jax.random.split(key_env, self.num_envs)
+        env_state = self.reset_fn(key_envs)
+        p_shst = env_state.info['steps'].shape
+
+        if self.scramble_initial_times:
+            key, key_scramble = jax.random.split(key)
+            env_state = self.scramble_times(env_state, key_scramble)
+
+        assert env_state.info['steps'].shape == p_shst
+        
+        if not self.eval_env:
+            eval_env = self.env
+        else:
+            # Not backpropping through, so no problem to just use vmapped env. 
+            eval_env = orig_wraps.wrap(
+                self.eval_env, episode_length=self.episode_length
+            )
+
+        training_state, key = self.init_training_state(key)
+        key_eval, key = jax.random.split(key)
+        evaluator = acting.Evaluator(
+            eval_env,
+            functools.partial(self.make_policy, deterministic=self.deterministic_eval),
+            num_eval_envs=self.num_eval_envs,
+            episode_length=self.episode_length,
+            action_repeat=1,
+            key=key_eval)
+
+        # # Run initial eval
+        if self.num_evals > 1:
+            t0 = time.time()
             metrics = evaluator.run_evaluation(
-                    (training_state.normalizer_params, training_state.policy_params),
-                training_metrics)
+                (training_state.normalizer_params, training_state.policy_params),
+                training_metrics={})
             logging.info(metrics)
-            print("Training epoch SPS: {}".format(metrics["training/sps"]))
-            progress_fn(current_step, metrics)
+            print("Initial eval time: {:.4f} s".format(time.time() - t0))
+            self.progress_fn(0, metrics)
 
+        self.training_walltime = 0
+        current_step = 0
+        
+        # Delete previous checkpoints
+        print("Deleting old checkpoints!")
+        top = Path(Path(__file__).parent,
+                Path('checkpoints'))
+        for constituent in top.iterdir():
+            constituent.unlink()
+        
+        local_key, key = jax.random.split(key)
+        for it in range(self.num_evals_after_init):
+            logging.info('starting iteration %s %s', it, time.time() - xt)
 
-    total_steps = current_step
-    assert total_steps >= num_timesteps
+            # optimization
+            epoch_key, local_key = jax.random.split(local_key)
 
-    logging.info('total steps: %s', total_steps)
-    policy_params = (training_state.normalizer_params, training_state.policy_params)
-    value_params = (training_state.normalizer_params, training_state.target_value_params)
-    return (make_policy, policy_params, value_params, metrics)
+            # CHECKPOINT STARTING STATE
+            algo_state = {
+                "epoch_key": epoch_key,
+                "local_key": local_key,
+                "training_state": training_state,
+                "env_state": env_state
+            }
+
+            epoch_start_env_time = env_state.pipeline_state.time[0]
+            epoch_start_state = env_state.pipeline_state.qpos[0, 0]
+
+            (training_state, env_state,
+                training_metrics) = self.training_epoch_with_timing(training_state, env_state, epoch_key)
+            
+            # CHECKPOINT THE KEYS THAT WERE USED
+            algo_state["unroll_keys"] = training_metrics['training/unroll_keys'][0] # Remove extra batch dim.
+            
+            file_name = f'checkpoint_{it}.pkl' if self.save_all_checkpoints else 'checkpoint.pkl'
+            save_to = str(Path(Path(__file__).parent,
+                            Path('checkpoints'),
+                            Path(file_name)))
+                                
+            pickle.dump(algo_state, open(save_to, "wb"))
+            
+            print("Checkpointed for epoch {}".format(it))
+            
+            # VERIFY AUTODIFF
+            if self.num_grad_checks is not None:
+                pre_update = pickle.load(open(save_to, "rb"))
+                pts = pre_update['training_state']
+                key_ub, key_ind, epoch_key = jax.random.split(epoch_key, 3)
+                i_ub = jax.random.choice(key_ub, self.num_envs)
+                
+                state = unvmap(pre_update['env_state'], i_ub)
+                ad_grads_extradim = training_metrics['training/b_policy_gradient']
+                ad_grads = unvmap(ad_grads_extradim, 0) # batched across episodes
+                ad_grads_ub = unvmap(ad_grads, i_ub)
+
+                unroll_key = unvmap(training_metrics['training/unroll_keys'][0], i_ub)
+                
+                _checkify_err, grad_err = self.fd_gradient_checks(pts.policy_params, pts.value_params, 
+                                            pts.normalizer_params, state, 
+                                            key_ind, unroll_key, ad_grads_ub)
+                
+                writer.add_scalar('policy/autodiff_error', grad_err, it)
+                
+            current_step = int(training_state.env_steps)
+
+            epoch_end_env_time = env_state.pipeline_state.time[0]
+            epoch_end_env_state = env_state.pipeline_state.qpos[0, 0]
+
+            #### Policy Gradient Saving ####
+            if self.save_all_policy_gradients:
+                file_name = f'bgrad_{it}.pkl'
+                save_to = str(Path(Path(__file__).parent,
+                                Path('policy_gradients'),
+                                Path(file_name)))
+                to_save = unvmap(training_metrics['training/b_policy_gradient'], 0) # Empty batch dim.
+
+                pickle.dump(to_save, open(save_to, "wb"))
+            
+            #### TENSORBOARDING ####
+            """ 
+            Folders: 
+            - env
+            - policy
+            - critic
+            """
+            
+            # Get rid of batch dim from def training_epoch
+            # metrics = jax.tree_util.tree_map(lambda x: x[0], metrics)
+            
+            if self.use_tbx:
+                ## ENV ##
+                writer.add_scalar("env/Starting env 0 time", epoch_start_env_time, it)
+                writer.add_scalar("env/Ending env 0 time", epoch_end_env_time, it)
+                writer.add_scalar("env/Starting env 0 state", epoch_start_state, it)
+                writer.add_scalar("env/Ending env 0 state", epoch_end_env_state, it)
+                # Additional debug
+                writer.add_scalar("env/Env 0 done", env_state.done[0], it)
+                writer.add_scalar("env/Env 0 height", env_state.pipeline_state.qpos[0, 2], it)
+                writer.add_scalar("env/Env 0 up", env_state.obs[0, 35], it)
+                # Rewards
+                rew_tup = training_metrics['training/reward_tuples']
+                ub_rew_tup = unvmap(rew_tup, 0)
+                for key, val in ub_rew_tup.items():
+                    assert val.size == self.unroll_length * self.num_envs, print(val)
+                    agg = jnp.mean(val)
+                    writer.add_scalar(f'rewards/Reward {key}', agg, it)
+
+                ## POLICY ##
+                act_s = training_metrics['training/action_size'][0]
+                writer.add_scalar('policy/action size', act_s, it)
+                ub_pg = jax.tree_util.tree_map(lambda x: x[0], 
+                                            training_metrics['training/policy_gradient'])
+                flattened_vals, _ = ravel_pytree(ub_pg)
+                policy_grad_size = jnp.sqrt(jnp.mean(jnp.square(flattened_vals)))
+                writer.add_scalar('policy/||Policy gradient||', policy_grad_size, it)
+                # if jnp.isnan(policy_grad_size):
+                #     raise ValueError("Nan policy gradient!")
+                avg_policy_loss = training_metrics['training/policy_loss'][0].mean()
+                writer.add_scalar('policy/Policy loss', avg_policy_loss, it)
+                avg_entropy_loss = training_metrics['training/entropy_loss'][0].mean()
+                writer.add_scalar('policy/Entropy loss', avg_entropy_loss, it)
+                p_nan_grads = training_metrics['training/p_nan_grads'][0]
+                writer.add_scalar('policy/p_nan_grads', p_nan_grads, it)
+                p_clipped_grads = training_metrics['training/p_clipped_grads'][0]
+                writer.add_scalar('policy/p_clipped_grads', p_clipped_grads, it)
+                
+                ## CRITIC ##
+                td_lam = training_metrics['training/target_value_params_size'][0]
+                writer.add_scalar('critic/td_lam_value_norm', td_lam, it)
+                crit_s = training_metrics['training/target_critic_output_size'][0]
+                writer.add_scalar('critic/critic output size', crit_s, it)
+                last_critic_loss = (training_metrics['training/v_loss'][0].mean(axis=1))[-1] # 16 x 256
+                writer.add_scalar('critic/Last epoch critic loss', last_critic_loss, it)
+                
+                ## Timing
+                writer.add_scalar("sps", training_metrics['training/sps'], it)
+                writer.add_scalar('Wall-Clock Time', training_metrics['training/walltime'], it)
+
+            if not self.use_tbx:
+                metrics = evaluator.run_evaluation(
+                        (training_state.normalizer_params, training_state.policy_params),
+                    training_metrics)
+                logging.info(metrics)
+                print("Training epoch SPS: {}".format(metrics["training/sps"]))
+                self.progress_fn(current_step, metrics)
+
+        total_steps = current_step
+        assert total_steps >= self.num_timesteps
+
+        logging.info('total steps: %s', total_steps)
+        policy_params = (training_state.normalizer_params, training_state.policy_params)
+        value_params = (training_state.normalizer_params, training_state.target_value_params)
+        return (self.make_policy, policy_params, value_params, metrics)
+    

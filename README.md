@@ -22,10 +22,12 @@
 ## Warning: MJX + Exploding Gradients
 - Having great difficulty applying SHAC to get Anymal to walk.
 - Hypothesis: it's because quadruped gait is very contact-rich, leading to uninformative gradients.
+
 ![image](https://github.com/Andrew-Luo1/jax_shac/assets/22626914/d774bea2-ef44-4370-8b77-b84594e780a4)
 ![image](https://github.com/Andrew-Luo1/jax_shac/assets/22626914/6262b083-a2dc-4402-ac2e-0d25d76f5cb4)
-![image](https://github.com/Andrew-Luo1/jax_shac/assets/22626914/a939d83f-2075-4866-8a7a-0893ef892fdf)
-![anymal_vid-ezgif com-video-to-gif-converter](https://github.com/Andrew-Luo1/jax_shac/assets/22626914/47b6561c-1a14-43fb-bfe0-a7d74361e6ec)
+![image](https://github.com/Andrew-Luo1/jax_shac/assets/22626914/a939d83f-2075-4866-8a7a-0893ef892fdf){:width="300px" height="230px"}
+
+![anymal_vid-ezgif com-video-to-gif-converter](https://github.com/Andrew-Luo1/jax_shac/assets/22626914/47b6561c-1a14-43fb-bfe0-a7d74361e6ec){:width="200px" height="150px"}
 
 *32-step rollout. Ground flashes red when step jacobian is greater than 10e2.*
   

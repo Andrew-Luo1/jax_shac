@@ -1,15 +1,10 @@
-import sys
 from pathlib import Path
-
-resources_dir = Path(__file__).parent.parent
-sys.path.append(str(resources_dir))
 
 from brax import envs
 from jax_shac.envs.mjx_envs import State, MjxEnv
 import mujoco
 import jax.numpy as jp
 import jax
-
 
 class FramedHopper(MjxEnv):
     

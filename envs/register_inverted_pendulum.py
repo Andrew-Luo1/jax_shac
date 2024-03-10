@@ -13,26 +13,25 @@
 # limitations under the License.
 
 # pylint:disable=g-multiple-import
-"""An inverted pendulum environment."""
-import sys
-from pathlib import Path
 
-resources_dir = Path(__file__).parent.parent
-sys.path.append(str(resources_dir))
+"""An inverted pendulum environment."""
+from pathlib import Path
 
 from brax import envs 
 import jax
 from jax import numpy as jp
 import mujoco
-from resources.mjx_envs import State, MjxEnv
+from jax_shac.envs.mjx_envs import State, MjxEnv
 
 class InvertedPendulum(MjxEnv):
   def __init__(self, **kwargs):
-    assets_path = Path(Path(__file__).parent.parent, Path("assets"))
-    xml_path = str(Path(assets_path, Path("inverted_pendulum.xml")))
-    mj_model = mujoco.MjModel.from_xml_path(xml_path)
-
+    self.action_strength = 4
+    xml_path = Path(Path(__file__).parent, Path("assets"), 
+                    Path("inverted_pendulum.xml"))
+        
+    mj_model = mujoco.MjModel.from_xml_path(str(xml_path))
     self.init_noise = kwargs.get("init_noise", 0.01)
+
     mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
     mj_model.opt.iterations = 1
     mj_model.opt.ls_iterations = 4

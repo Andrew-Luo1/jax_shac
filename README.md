@@ -21,7 +21,7 @@
 *Known Issues*: As seen in the rewards figure, training can be unstable.
 
 ## Warning: MJX + Exploding Gradients
-- Having great difficulty applying SHAC to get Anymal to walk.
+- Having great difficulty applying SHAC to get Anymal to walk with default 32-bit precision. (See [Mujoco](https://github.com/google-deepmind/mujoco/blob/main/mjx/training_apg.ipynb) for an example with 64-bit precision)
 - Hypothesis: it's because quadruped gait is very contact-rich, leading to uninformative gradients.
 
 <img src="https://github.com/Andrew-Luo1/jax_shac/assets/22626914/d774bea2-ef44-4370-8b77-b84594e780a4" width="800">
